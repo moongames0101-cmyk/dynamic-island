@@ -25,6 +25,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.view.Display
 import android.view.Gravity
 import android.view.View
@@ -66,6 +67,9 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     private var fullscreen = false
     private var shadeOpen = false
+    private var shadeWhy = ""
+    private var lastError: String? = null
+    private var probeCheck = 0
     private var landscape = false
     private var islandShown = true
     private var mediaPausedAt = 0L
@@ -99,8 +103,10 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         lastRinger = (getSystemService(AUDIO_SERVICE) as AudioManager).ringerMode
         try {
             addWindows()
+            lastError = null
         } catch (e: Exception) {
             android.util.Log.e("Island", "Could not add overlay windows", e)
+            lastError = e.javaClass.simpleName + ": " + (e.message ?: "")
         }
         registerReceivers()
         registerTorch()
@@ -227,24 +233,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         coverView = cv
         coverLp = clp
 
-        // 2. Invisible 1px probe that tells us when an app goes full-screen.
-        val pv = View(this)
-        val plp = overlayParams(1, 1, false)
-        plp.gravity = Gravity.TOP or Gravity.START
-        if (Build.VERSION.SDK_INT >= 30) {
-            pv.setOnApplyWindowInsetsListener { _, insets ->
-                setFullscreen(!insets.isVisible(WindowInsets.Type.statusBars()))
-                insets
-            }
-        } else {
-            pv.setOnSystemUiVisibilityChangeListener { vis ->
-                setFullscreen((vis and View.SYSTEM_UI_FLAG_FULLSCREEN) != 0)
-            }
-        }
-        wm.addView(pv, plp)
-        probeView = pv
-
-        // 3. The island itself.
+        // 2. The island itself.
         val iv = IslandView(this, this)
         val ilp = overlayParams(1, 1, true)
         ilp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
@@ -253,6 +242,75 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         computePosition()
         wm.addView(iv, ilp)
         updateCover()
+
+        // 3. Full-screen detector (optional).
+        updateProbe()
+    }
+
+    /**
+     * Invisible 1px window that tells us when an app hides the status bar (videos, games).
+     * On Android 11+ it has to sit *below* the status bar to be told about it, which needs the
+     * "Display over other apps" permission. Without it we simply never hide.
+     */
+    @Suppress("DEPRECATION")
+    private fun updateProbe() {
+        val wantProbe = Build.VERSION.SDK_INT < 30 || Settings.canDrawOverlays(this)
+        val existing = probeView
+        if (!wantProbe) {
+            if (existing != null) {
+                try { wm.removeViewImmediate(existing) } catch (e: Exception) { }
+                probeView = null
+            }
+            setFullscreen(false)
+            return
+        }
+        if (existing != null) return
+        try {
+            val pv = View(this)
+            val plp: WindowManager.LayoutParams
+            if (Build.VERSION.SDK_INT >= 30) {
+                plp = WindowManager.LayoutParams(
+                    1, 1,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT
+                )
+                plp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                plp.fitInsetsTypes = 0
+                pv.setOnApplyWindowInsetsListener { _, insets ->
+                    // Only trust the answer if this window actually knows about a status bar.
+                    val max = insets.getInsetsIgnoringVisibility(WindowInsets.Type.statusBars())
+                    val known = max.top > 0 || max.left > 0 || max.right > 0 || max.bottom > 0
+                    setFullscreen(known && !insets.isVisible(WindowInsets.Type.statusBars()))
+                    insets
+                }
+            } else {
+                plp = overlayParams(1, 1, false)
+                pv.setOnSystemUiVisibilityChangeListener { vis ->
+                    setFullscreen((vis and View.SYSTEM_UI_FLAG_FULLSCREEN) != 0)
+                }
+            }
+            plp.gravity = Gravity.TOP or Gravity.START
+            wm.addView(pv, plp)
+            probeView = pv
+        } catch (e: Exception) {
+            probeView = null
+            setFullscreen(false)
+        }
+    }
+
+    /** One-line health report shown in the app, so problems are visible in a screenshot. */
+    fun statusText(): String {
+        lastError?.let { return "Error: $it" }
+        if (islandView == null) return "Running, but the overlay couldn't be drawn"
+        val why = mutableListOf<String>()
+        if (!prefs.getBoolean(P.ENABLED, true)) why += "switched off"
+        if (landscape) why += "phone is sideways"
+        if (shadeOpen) why += "notification shade open" + (if (shadeWhy.isNotEmpty()) " ($shadeWhy)" else "")
+        if (fullscreen) why += "full-screen app"
+        return if (why.isEmpty()) "Running ✓ — island is showing" else "Running, hidden because: " + why.joinToString(", ")
     }
 
     private fun pushIslandLayout() {
@@ -363,6 +421,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     /** Hide while the notification shade / quick settings are pulled down. */
     private fun checkShade() {
         var open = false
+        var why = ""
         try {
             val km = getSystemService(KeyguardManager::class.java)
             if (km == null || !km.isKeyguardLocked) {
@@ -371,14 +430,21 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
                 for (w in windows) {
                     if (w.type != AccessibilityWindowInfo.TYPE_SYSTEM) continue
                     w.getBoundsInScreen(r)
-                    if (r.height() > dm.heightPixels * 0.45f && r.width() > dm.widthPixels * 0.6f) {
+                    if (r.height() <= dm.heightPixels * 0.45f || r.width() <= dm.widthPixels * 0.6f) continue
+                    // Only a big system window that is the shade (by name), or that has focus.
+                    val title = w.title?.toString()?.lowercase() ?: ""
+                    val named = title.contains("notification") || title.contains("shade") ||
+                        title.contains("quick") || title.contains("panel")
+                    if (named || (title.isEmpty() && (w.isFocused || w.isActive))) {
                         open = true
+                        why = title
                         break
                     }
                 }
             }
         } catch (e: Exception) {
         }
+        shadeWhy = why
         if (open != shadeOpen) {
             shadeOpen = open
             applyVisibility()
@@ -685,6 +751,11 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             }
             panel?.tick()
             checkPrompts()
+            // Pick up the "Display over other apps" permission if it was just granted (or removed).
+            if (++probeCheck >= 3) {
+                probeCheck = 0
+                if (islandView != null) updateProbe()
+            }
             main.postDelayed(this, 1000L)
         }
     }

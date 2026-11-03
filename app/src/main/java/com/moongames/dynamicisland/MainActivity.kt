@@ -107,6 +107,10 @@ class MainActivity : Activity() {
         super.onResume()
         visible = true
         refreshers.forEach { it() }
+        statusTicker?.let {
+            root.removeCallbacks(it)
+            root.postDelayed(it, 1500L)
+        }
         if (System.currentTimeMillis() - lastCheck > 10 * 60 * 1000L) checkForUpdates(false)
     }
 
@@ -147,6 +151,24 @@ class MainActivity : Activity() {
 
     private fun buildSetup() {
         val c = section("Setup")
+        val status = label("", 14f, C.GRAY, bold = true, lines = 3)
+        status.setPadding(0, 14.dp, 0, 4.dp)
+        c.addView(status)
+        val paintStatus = {
+            val s = IslandService.instance
+            val text = when {
+                s != null -> s.statusText()
+                a11yOn() -> "Switched on, but not running — turn the Island overlay off and on again"
+                else -> "Not running — turn on Island overlay below"
+            }
+            status.text = "Status: $text"
+            status.setTextColor(if (text.startsWith("Running ✓")) C.GREEN else C.ORANGE)
+        }
+        refreshers += paintStatus
+        statusTicker = Runnable {
+            paintStatus()
+            if (visible) statusTicker?.let { root.postDelayed(it, 1500L) }
+        }
         statusRow(c, "Island overlay", "Accessibility service that draws the island over the status bar.", { a11yOn() }, "Turn on") {
             toast("Open \"Dynamic Island\" and switch it on")
             open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -181,7 +203,13 @@ class MainActivity : Activity() {
         statusRow(c, "Install updates", "Lets the app install new versions from GitHub.", { packageManager.canRequestPackageInstalls() }, "Allow") {
             open(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
         }
+        divider(c)
+        statusRow(c, "Hide during videos & games", "Optional. \"Display over other apps\" lets the island tell when an app goes full-screen.", { Settings.canDrawOverlays(this) }, "Allow") {
+            open(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+        }
     }
+
+    private var statusTicker: Runnable? = null
 
     private fun buildTry() {
         val c = section("Try it")
@@ -427,7 +455,16 @@ class MainActivity : Activity() {
                     updateNotes.visibility = View.VISIBLE
                 }
                 updateButton.text = "Install update"
-                if (installIfFound) startInstall(rel)
+                if (installIfFound) {
+                    startInstall(rel)
+                } else if (!userAsked) {
+                    AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Update available")
+                        .setMessage("${rel.name} is ready.\n\n${rel.notes.take(300)}")
+                        .setPositiveButton("Install") { _, _ -> startInstall(rel) }
+                        .setNegativeButton("Later", null)
+                        .show()
+                }
             } else {
                 updateStatus.text = "You're on the latest version (${BuildConfig.VERSION_NAME})"
                 updateNotes.visibility = View.GONE
