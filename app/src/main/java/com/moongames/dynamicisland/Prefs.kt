@@ -33,6 +33,8 @@ object P {
     const val HIDE_LOCKED = "hide_locked"
     const val SWIPE_CLEARS = "swipe_clears"
     const val ANIM_SPEED = "anim_speed"
+    const val HAPTICS = "haptics"
+    const val SETUP_OPEN = "setup_open"
 
     const val F_NOTIFICATIONS = "f_notifications"
     const val F_MEDIA = "f_media"
@@ -47,18 +49,24 @@ object P {
     const val F_BLUETOOTH = "f_bluetooth"
     const val F_PROMPTS = "f_prompts"
     const val F_UNLOCK = "f_unlock"
+    const val F_ALARMS = "f_alarms"
+    const val F_DND = "f_dnd"
+    const val F_VOLUME = "f_volume"
 
     val FEATURES = listOf(
         Feature(F_NOTIFICATIONS, "Notifications", "Messages and alerts drop out of the island. Tip: turn off Android's own pop-up banners so you don't get two."),
         Feature(F_MEDIA, "Music & video", "Album art and a moving waveform. Tap for play/pause, skip and a seek bar."),
         Feature(F_CALLS, "Calls", "Incoming calls with Answer / Decline, and a call timer while you talk. Allow \"Calls\" in Setup so it works with every phone app."),
-        Feature(F_TIMERS, "Timers & stopwatch", "Live countdown from your Clock app (and screen recorders)."),
+        Feature(F_TIMERS, "Timers & stopwatch", "Live countdown from your Clock app (and screen recorders). Hold the island → Timer to start one of your own."),
+        Feature(F_ALARMS, "Alarms", "A ringing alarm shows in the island with Snooze and Stop."),
         Feature(F_NAVIGATION, "Maps directions", "Next turn from Google Maps and other navigation apps."),
         Feature(F_PROGRESS, "Downloads & uploads", "Progress ring for anything showing a progress bar."),
         Feature(F_CHARGING, "Charging", "Battery animation when you plug in, and Fully Charged."),
         Feature(F_LOWBATTERY, "Low battery", "Red warning when you drop to 20%."),
         Feature(F_RINGER, "Silent / Ring", "Shows when you switch sound mode."),
         Feature(F_FLASHLIGHT, "Flashlight", "Shows when the torch turns on or off."),
+        Feature(F_DND, "Focus / Do Not Disturb", "A moon pops up when Do Not Disturb turns on or off."),
+        Feature(F_VOLUME, "Volume", "Volume changes show as a little level bar in the island."),
         Feature(F_UNLOCK, "Unlock", "A padlock pops open when you unlock with your face or fingerprint."),
         Feature(F_BLUETOOTH, "Headphones", "Bluetooth headphones connecting (with battery %) and wired headphones plugged in."),
         Feature(F_PROMPTS, "Custom prompts", "Your own messages — on demand, pinned, or every day at a set time.")
@@ -86,11 +94,13 @@ object AutoSize {
         val res = ctx.resources
         val id = res.getIdentifier("status_bar_height", "dimen", "android")
         val px = if (id > 0) res.getDimensionPixelSize(id) else 0
-        val dp = if (px > 0) Math.round(px / res.displayMetrics.density) else 28
-        return (dp - 3).coerceIn(24, 34)
+        val dp = if (px > 0) Math.round(px / res.displayMetrics.density) else 30
+        // iPhone's island is ~37dp tall; most Android status bars are a little shorter, so
+        // sit just inside the bar but never go tiny.
+        return (dp - 1).coerceIn(30, 37)
     }
 
-    fun widthDp(ctx: Context): Int = Math.round(heightDp(ctx) * 3.3f)
+    fun widthDp(ctx: Context): Int = Math.round(heightDp(ctx) * 3.4f)
 }
 
 class Prompt(val id: Long, var text: String, var emoji: String, var time: String, var lastShown: String)

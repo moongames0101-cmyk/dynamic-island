@@ -20,11 +20,14 @@ It updates itself from this GitHub repo, so wherever you are, new versions reach
 | Notifications | From every app (or the ones you choose). Hold to see the full message and its buttons, **reply right from the island** |
 | Music & video | Album art + waveform; hold for play/pause, skip, seek |
 | Calls | Works with any phone app (reads only the call state). Round Answer / Decline, live call timer, hang up |
-| Timers | Countdown / stopwatch from your Clock app, with its buttons |
+| Timers | Countdown / stopwatch from your Clock app, with its buttons — or **start one from the island** (hold → Timer) |
+| Alarms | A ringing alarm shows with Snooze / Stop |
 | Maps | Next turn from Google Maps and other nav apps |
 | Downloads | Progress ring |
-| Charging | Battery animation on plug-in, Fully Charged, Low Battery |
+| Charging | Battery animation on plug-in (Wireless / USB), Fully Charged, Low Battery |
 | Silent / Ring | Sound mode changes, iPhone-style |
+| Focus | Do Not Disturb on / off (moon) |
+| Volume | Volume keys show a little level bar |
 | Unlock | A padlock pops open when you unlock |
 | Flashlight | Torch on / off |
 | Headphones | Bluetooth (with battery %) and wired |
@@ -35,6 +38,8 @@ It updates itself from this GitHub repo, so wherever you are, new versions reach
 swipe up to hide. Two activities at once split into the island plus a small circle.
 
 **Choose apps:** switch any app off, and star the ones you want in quick apps.
+**Battery:** the island sleeps while the screen is off and only ticks once a second when something is moving.
+**Settings app:** a live preview at the top shows your size and position changes; Material You colours on Android 12+.
 **Privacy:** message text is hidden while the phone is locked (optional). Nothing leaves your phone except the
 update check to GitHub. The diagnostics list records app names and notification types only, never content.
 

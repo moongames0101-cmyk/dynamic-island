@@ -29,6 +29,9 @@ abstract class Panel(val ctx: Context) {
 
     open fun tick() {}
 
+    /** True when something on screen changes every second (a timer, a seek bar). */
+    open val needsTick: Boolean get() = false
+
     /** Re-reads the item; returns true when the panel's size changed. */
     open fun refresh(): Boolean = false
 }
@@ -36,6 +39,7 @@ abstract class Panel(val ctx: Context) {
 object Panels {
     fun kindColor(kind: LiveKind): Int = when (kind) {
         LiveKind.CALL -> C.GREEN
+        LiveKind.ALARM -> C.ORANGE
         LiveKind.TIMER -> C.ORANGE
         LiveKind.NAV -> C.BLUE
         LiveKind.PROGRESS -> C.BLUE
@@ -46,6 +50,7 @@ object Panels {
     fun kindIcon(ctx: Context, kind: LiveKind): Drawable? {
         val res = when (kind) {
             LiveKind.CALL -> R.drawable.ic_call
+            LiveKind.ALARM -> R.drawable.ic_alarm
             LiveKind.TIMER -> R.drawable.ic_timer
             LiveKind.NAV -> R.drawable.ic_nav
             LiveKind.PROGRESS -> R.drawable.ic_download
@@ -72,11 +77,13 @@ object Panels {
     }
 
     fun quickApps(svc: IslandService, apps: List<QuickApp>, g: Geo): Panel = QuickAppsPanel(svc, apps, g)
+    fun timerPicker(svc: IslandService, g: Geo): Panel = TimerPickPanel(svc, g)
 
     fun actionColor(title: String): Int {
         val t = title.lowercase()
         return when {
-            listOf("decline", "reject", "hang", "end", "cancel", "stop", "dismiss").any { t.contains(it) } -> C.RED
+            listOf("snooze", "later").any { t.contains(it) } -> C.CARD2
+            listOf("decline", "reject", "hang", "end", "cancel", "stop", "dismiss", "turn off").any { t.contains(it) } -> C.RED
             listOf("answer", "accept", "pick up").any { t.contains(it) } -> C.GREEN
             else -> C.CARD2
         }
@@ -104,6 +111,8 @@ private class CompactPanel(private val svc: IslandService, private val item: Liv
     private var rightText: TextView? = null
     private var wave: WaveformView? = null
     private var ring: RingView? = null
+    private var pulsing = false
+    private val baseTextSp = 14f
 
     init {
         height = g.idleH
@@ -153,6 +162,13 @@ private class CompactPanel(private val svc: IslandService, private val item: Liv
             LiveKind.CALL -> {
                 leftImg.setImageDrawable(Panels.kindIcon(svc, LiveKind.CALL))
                 rightText?.text = if (item.hasChrono) item.chronoText() else if (item.incoming) "Incoming" else "Call"
+                setPulse(item.incoming)
+            }
+            LiveKind.ALARM -> {
+                leftImg.setImageDrawable(Panels.kindIcon(svc, LiveKind.ALARM))
+                rightText?.text = item.title.ifEmpty { "Alarm" }
+                fitText()
+                setPulse(true)
             }
             LiveKind.TIMER -> {
                 leftImg.setImageDrawable(Panels.kindIcon(svc, LiveKind.TIMER))
@@ -162,6 +178,7 @@ private class CompactPanel(private val svc: IslandService, private val item: Liv
                 leftImg.setImageDrawable(item.icon ?: Panels.kindIcon(svc, LiveKind.NAV))
                 rightText?.setTextColor(Color.WHITE)
                 rightText?.text = item.title.ifEmpty { item.text }
+                fitText()
             }
             LiveKind.PROGRESS -> {
                 leftImg.setImageDrawable(item.icon ?: Panels.kindIcon(svc, LiveKind.PROGRESS))
@@ -172,9 +189,40 @@ private class CompactPanel(private val svc: IslandService, private val item: Liv
                 else leftImg.setImageDrawable(Panels.kindIcon(svc, LiveKind.PROMPT))
                 rightText?.setTextColor(Color.WHITE)
                 rightText?.text = item.title
+                fitText()
             }
         }
     }
+
+    /** Shrinks long text (down to 11sp) so it fits instead of being chopped with "…". */
+    private fun fitText() {
+        val t = rightText ?: return
+        t.textSize = baseTextSp
+        val maxW = 120.dp.toFloat()
+        val w = t.paint.measureText(t.text.toString())
+        if (w > maxW && w > 0f) t.textSize = max(11f, baseTextSp * maxW / w)
+    }
+
+    /** Gentle heartbeat on the icon while a call or alarm is waiting for you. */
+    private fun setPulse(on: Boolean) {
+        if (on == pulsing) return
+        pulsing = on
+        leftImg.animate().cancel()
+        if (!on) {
+            leftImg.scaleX = 1f
+            leftImg.scaleY = 1f
+            return
+        }
+        fun beat() {
+            if (!pulsing) return
+            leftImg.animate().scaleX(1.18f).scaleY(1.18f).setDuration(380).withEndAction {
+                leftImg.animate().scaleX(1f).scaleY(1f).setDuration(520).withEndAction { if (pulsing) beat() }.start()
+            }.start()
+        }
+        leftImg.postDelayed({ beat() }, 300L)
+    }
+
+    override val needsTick: Boolean get() = item.hasChrono && (item.kind == LiveKind.TIMER || item.kind == LiveKind.CALL)
 
     private fun computeWidth(): Int {
         val rt = rightText
@@ -220,6 +268,7 @@ private class MediaPanel(private val svc: IslandService, private val item: LiveI
     private val remain = svc.label("-0:00", 11.5f, C.GRAY)
     private val play = ImageView(svc)
     private var dragging = false
+    private var glowColor = 0
 
     init {
         width = g.cardW
@@ -320,8 +369,20 @@ private class MediaPanel(private val svc: IslandService, private val item: LiveI
         wave.tint = item.accent
         wave.setPlaying(m?.playing == true)
         play.setImageResource(if (m?.playing == true) R.drawable.ic_pause else R.drawable.ic_play)
+        // iOS 17-style: the player glows faintly with the album's colour.
+        if (item.accent != glowColor) {
+            glowColor = item.accent
+            val dim = Colors.blend(item.accent, Color.BLACK, 0.78f)
+            val gd = android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
+                intArrayOf(dim, Color.BLACK, Color.BLACK)
+            )
+            root.background = gd
+        }
         tick()
     }
+
+    override val needsTick: Boolean get() = true
 
     override fun tick() {
         val m = item.media ?: return
@@ -424,6 +485,8 @@ private class GenericPanel(private val svc: IslandService, private val item: Liv
         else if (item.kind == LiveKind.PROGRESS && item.progress >= 0f) "${(item.progress * 100).toInt()}%"
         else ""
     }
+
+    override val needsTick: Boolean get() = item.hasChrono
 
     override fun refresh(): Boolean {
         bind()
@@ -557,6 +620,13 @@ private class BannerPanel(svc: IslandService, t: ToastItem, g: Geo) : Panel(svc)
         root.addView(left, flp(WRAP, WRAP, Gravity.START or Gravity.CENTER_VERTICAL).apply { marginStart = 14.dp })
 
         val right = svc.hbox()
+        if (t.level >= 0f) {
+            // Volume-style level bar.
+            val bar = LevelView(svc)
+            bar.tint = t.accent
+            bar.level = t.level
+            right.addView(bar, llp(64.dp, 5.dp).apply { marginEnd = if (t.value.isNotEmpty()) 8.dp else 0 })
+        }
         if (t.value.isNotEmpty()) {
             right.addView(svc.label(t.value, 14.5f, t.accent, bold = true), llp(WRAP, WRAP))
         }
@@ -622,6 +692,8 @@ private class CallPanel(private val svc: IslandService, private val item: LiveIt
         }
         row.addView(b, llp(52.dp, 52.dp).apply { marginStart = 10.dp })
     }
+
+    override val needsTick: Boolean get() = item.hasChrono
 
     override fun tick() {
         if (item.incoming) {
@@ -763,6 +835,45 @@ private class QuickAppsPanel(private val svc: IslandService, apps: List<QuickApp
             grid.addView(row, llp(MATCH, WRAP))
         }
         root.addView(grid, flp(MATCH, MATCH))
+    }
+}
+
+/** Hold the island → Timer: pick how long, and the island counts it down. */
+private class TimerPickPanel(private val svc: IslandService, g: Geo) : Panel(svc) {
+    private val root = FrameLayout(svc)
+    override val view: View get() = root
+
+    init {
+        width = g.cardW
+        height = 118.dp
+        radius = 40f.dpf
+        val col = svc.vbox()
+        col.setPadding(18.dp, 16.dp, 18.dp, 14.dp)
+        val head = svc.hbox()
+        val ic = ImageView(svc)
+        ic.setImageDrawable(svc.tinted(R.drawable.ic_timer, C.ORANGE))
+        head.addView(ic, llp(20.dp, 20.dp))
+        head.addView(svc.label("Timer", 15.5f, Color.WHITE, bold = true).apply { setPadding(8.dp, 0, 0, 0) }, llp(0, WRAP, 1f))
+        val back = svc.label("Back", 13f, C.GRAY)
+        back.setOnClickListener { svc.backToQuickApps() }
+        head.addView(back, llp(WRAP, WRAP))
+        col.addView(head, llp(MATCH, WRAP))
+
+        val row = svc.hbox()
+        row.setPadding(0, 14.dp, 0, 0)
+        listOf(1, 3, 5, 10, 15, 30).forEachIndexed { i, m ->
+            val b = svc.label("$m", 15f, C.ORANGE, bold = true)
+            b.gravity = Gravity.CENTER
+            b.background = roundRect(0x33FF9F0A, 22f.dpf)
+            b.setOnClickListener {
+                svc.touched()
+                svc.startTimer(m)
+            }
+            row.addView(b, llp(0, 44.dp, 1f).apply { if (i > 0) marginStart = 7.dp })
+        }
+        col.addView(row, llp(MATCH, WRAP))
+        col.addView(svc.label("minutes", 11.5f, C.GRAY).apply { gravity = Gravity.CENTER; setPadding(0, 6.dp, 0, 0) }, llp(MATCH, WRAP))
+        root.addView(col, flp(MATCH, MATCH))
     }
 }
 

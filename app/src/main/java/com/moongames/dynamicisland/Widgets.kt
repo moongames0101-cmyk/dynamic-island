@@ -139,7 +139,34 @@ class RingView(ctx: Context) : View(ctx) {
     }
 }
 
+/** Thin rounded level bar (volume). */
+class LevelView(ctx: Context) : View(ctx) {
+    var tint = Color.WHITE
+    var level = 0f
+        set(v) { field = v.coerceIn(0f, 1f); invalidate() }
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        paint.color = 0x40FFFFFF
+        canvas.drawRoundRect(0f, 0f, w, h, h / 2f, h / 2f, paint)
+        if (level > 0f) {
+            paint.color = tint
+            canvas.drawRoundRect(0f, 0f, max(h, w * level), h, h / 2f, h / 2f, paint)
+        }
+    }
+}
+
 object Colors {
+    /** Mixes [a] towards [b] by [t] (0 = a, 1 = b). */
+    fun blend(a: Int, b: Int, t: Float): Int {
+        val k = t.coerceIn(0f, 1f)
+        fun ch(x: Int, y: Int) = (x + (y - x) * k).toInt().coerceIn(0, 255)
+        return Color.argb(255, ch(Color.red(a), Color.red(b)), ch(Color.green(a), Color.green(b)), ch(Color.blue(a), Color.blue(b)))
+    }
+
     /** Picks a bright, saturated colour from album art (like iOS tints the waveform). */
     fun vibrant(b: Bitmap?): Int {
         if (b == null) return Color.WHITE

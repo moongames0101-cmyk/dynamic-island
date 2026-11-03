@@ -69,9 +69,10 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
     private var bubbleKey: String? = null
     private var bubbleSize = 0
     private val bubbleGap = 6.dp
-    // Well-damped springs: smooth and settled, with almost no wobble.
+    // Like iOS: growing has a touch of overshoot, shrinking settles cleanly.
+    private val springGrow = Spring(0.8f)
+    private val springShrink = Spring(0.96f)
     private val springSize = Spring(0.9f)
-    private val springSoft = Spring(0.95f)
     private val easeOut = PathInterpolator(0.2f, 0f, 0f, 1f)
 
     private val detector = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
@@ -151,6 +152,17 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
         }
     }
 
+    /** A soft tick you feel when something pops out of the island. */
+    fun tick() {
+        try {
+            performHapticFeedback(
+                HapticFeedbackConstants.CONTEXT_CLICK,
+                HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING
+            )
+        } catch (e: Exception) {
+        }
+    }
+
     fun bounce() {
         pill.pivotX = pill.width / 2f
         pill.animate().scaleX(1.04f).scaleY(1.04f).setStartDelay(0).setDuration(110)
@@ -189,11 +201,13 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
             return
         }
 
+        val growing = w.toLong() * h >= sw.toLong() * sh
+        val spring = if (growing) springGrow else springShrink
         val a = ValueAnimator.ofFloat(0f, 1f)
-        a.duration = (460L * svc.animFactor()).toLong()
+        a.duration = ((if (growing) 520L else 400L) * svc.animFactor()).toLong()
         a.interpolator = LinearInterpolator()
         a.addUpdateListener {
-            val f = springSize.getInterpolation(it.animatedValue as Float)
+            val f = spring.getInterpolation(it.animatedValue as Float)
             applySize(
                 (sw + (w - sw) * f).toInt(),
                 (sh + (h - sh) * f).toInt(),

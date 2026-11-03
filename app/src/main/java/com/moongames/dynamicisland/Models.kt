@@ -9,7 +9,7 @@ import android.media.session.MediaController
 import android.os.SystemClock
 
 enum class LiveKind(val priority: Int) {
-    CALL(100), TIMER(80), NAV(70), MEDIA(60), PROGRESS(50), PROMPT(10)
+    CALL(100), ALARM(95), TIMER(80), NAV(70), MEDIA(60), PROGRESS(50), PROMPT(10)
 }
 
 /**
@@ -101,7 +101,11 @@ class ToastItem(
     /** The app's buttons (Reply, Mark as read…), shown when you touch and hold. */
     val actions: List<NotifAction> = emptyList(),
     /** The notification this came from, so swiping it away can clear it. */
-    val notifKey: String? = null
+    val notifKey: String? = null,
+    /** Pop-ups with the same tag replace each other instead of queuing (volume, brightness…). */
+    val tag: String? = null,
+    /** 0..1 level bar shown under the value (volume). -1 = none. */
+    val level: Float = -1f
 ) {
     val expandable: Boolean get() = style == ToastStyle.CARD && (actions.isNotEmpty() || text.length > 60)
 

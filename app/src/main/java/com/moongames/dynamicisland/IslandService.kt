@@ -53,8 +53,11 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         const val MEDIA_KEY = "media"
         const val PROMPT_KEY = "pinned_prompt"
         const val PHONE_CALL_KEY = "phone_state_call"
+        const val OWN_TIMER_KEY = "own_timer"
         private const val DEMO_CALL = "demo_call"
         private const val DEMO_TIMER = "demo_timer"
+        private const val TIMER_CHANNEL = "timers"
+        private const val TIMER_NOTIF = 77
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -73,6 +76,11 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     private var expandedKey: String? = null
     private var toastExpanded = false
     private var quickOpen = false
+    private var timerPick = false
+    private var timerDone = false
+    private var screenOn = true
+    private var lastProbeCheck = 0L
+    private var lastRebindCheck = 0L
     private var callState = TelephonyManager.CALL_STATE_IDLE
     private var callStart = 0L
     private var phoneCallback: Any? = null
@@ -83,8 +91,6 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     private var shadeOpen = false
     private var shadeWhy = ""
     private var lastError: String? = null
-    private var probeCheck = 0
-    private var rebindCheck = 25
     private var touchW = 1
     private var touchH = 1
     private var touchExtra = 0
@@ -143,7 +149,21 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val t = event?.eventType ?: return
         if (t == AccessibilityEvent.TYPE_WINDOWS_CHANGED || t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            checkShade()
+            guard("shade") { checkShade() }
+        }
+    }
+
+    /**
+     * Runs [block] and swallows anything it throws. An uncaught exception in an accessibility
+     * service switches the whole service off until you re-enable it, so one odd notification
+     * must never be allowed to take the island down.
+     */
+    inline fun guard(what: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (e: Exception) {
+            android.util.Log.e("Island", "Problem in $what", e)
+            Diag.add("Problem in $what: ${e.javaClass.simpleName}")
         }
     }
 
@@ -163,6 +183,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         if (!connected) return
         connected = false
         if (instance === this) instance = null
+        stopBuzz()
         main.removeCallbacksAndMessages(null)
         try { prefs.unregisterOnSharedPreferenceChangeListener(this) } catch (e: Exception) { }
         if (receiversOn) {
@@ -211,6 +232,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
                 if (!feature(P.F_MEDIA)) removeLive(MEDIA_KEY) else NotifListener.instance?.resync()
             }
             P.IDLE_VISIBLE, P.ENABLED, P.HIDE_FULLSCREEN -> render(true)
+            P.F_TIMERS -> if (!feature(P.F_TIMERS)) cancelOwnTimer()
             P.BLOCKED_APPS -> {
                 val off = blockedApps()
                 lives.values.filter { it.pkg in off && it.key != PHONE_CALL_KEY }.map { it.key }.forEach { removeLive(it) }
@@ -353,8 +375,10 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         if (shadeOpen) why += "notification shade open" + (if (shadeWhy.isNotEmpty()) " ($shadeWhy)" else "")
         if (fullscreen) why += "full-screen app"
         if (why.isNotEmpty()) return "Running, hidden because: " + why.joinToString(", ")
-        return if (NotifListener.instance != null) "Running ✓ — island showing, notifications connected"
-        else "Running, but notifications aren't connected — turn Notification access off and on"
+        if (NotifListener.instance == null) return "Running, but notifications aren't connected — turn Notification access off and on"
+        val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) return "Running ✓ — allow \"Keep running\" so battery saver can't stop it"
+        return "Running ✓ — island showing, notifications connected"
     }
 
     private fun pushIslandLayout() {
@@ -458,7 +482,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     private fun applyVisibility() {
         if (!::prefs.isInitialized) return
         val enabled = prefs.getBoolean(P.ENABLED, true)
-        val showIsland = enabled && !landscape && !shadeOpen &&
+        val showIsland = enabled && screenOn && !landscape && !shadeOpen &&
             !(fullscreen && prefs.getBoolean(P.HIDE_FULLSCREEN, true))
         val iv = islandView ?: return
         val p = touchLp ?: return
@@ -512,7 +536,9 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     // ------------------------------------------------------------------ rendering
 
-    fun render(force: Boolean = false) {
+    fun render(force: Boolean = false) = guard("render") { renderNow(force) }
+
+    private fun renderNow(force: Boolean) {
         val iv = islandView ?: return
         applyVisibility()
         val g = geo()
@@ -523,12 +549,17 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         val id: String
         val make: () -> Panel
         if (t == null) toastExpanded = false
-        val showQuick = quickOpen && t == null
+        val showQuick = quickOpen && t == null && !timerPick
+        val showTimerPick = timerPick && t == null
         when {
             t != null -> {
                 val ex = toastExpanded && t.expandable
                 id = "toast:${t.id}:$ex"
                 make = { Panels.toast(this, t, g, ex) }
+            }
+            showTimerPick -> {
+                id = "timerpick"
+                make = { Panels.timerPicker(this, g) }
             }
             showQuick -> {
                 val apps = quickApps()
@@ -559,7 +590,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             iv.morph(p.width, p.height, p.radius, p.view)
         }
         // iPhone-style split: a second activity shows as a small circle beside the island.
-        val second = if (t == null && !showQuick && exp == null && top != null) secondLive(top.key) else null
+        val second = if (t == null && !showQuick && !showTimerPick && exp == null && top != null) secondLive(top.key) else null
         iv.setBubble(second, g.idleH)
     }
 
@@ -596,7 +627,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             action?.invoke()
             return
         }
-        if (quickOpen) {
+        if (quickOpen || timerPick) {
             collapse()
             return
         }
@@ -662,7 +693,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             nextToast()
             return
         }
-        if (quickOpen) {
+        if (quickOpen || timerPick) {
             collapse()
             return
         }
@@ -709,6 +740,10 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         }
         if (quickOpen) {
             quickOpen = false
+            changed = true
+        }
+        if (timerPick) {
+            timerPick = false
             changed = true
         }
         if (toastExpanded && toast != null) {
@@ -811,6 +846,9 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             .filter { packageManager.getLaunchIntentForPackage(it) != null }
             .take(QuickDefaults.MAX)
         val list = pkgs.map { pkg -> QuickApp(appLabel(pkg), appIcon(pkg)) { launchApp(pkg) } }.toMutableList()
+        if (feature(P.F_TIMERS)) {
+            list.add(QuickApp("Timer", tinted(R.drawable.ic_timer, C.ORANGE)) { openTimerPicker() })
+        }
         list.add(QuickApp("Edit", tinted(R.drawable.ic_add, android.graphics.Color.WHITE)) {
             try {
                 startActivity(Intent(this, AppsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -818,6 +856,145 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             }
         })
         return list
+    }
+
+    // ------------------------------------------------------------------ built-in timer
+
+    fun openTimerPicker() {
+        timerPick = true
+        quickOpen = false
+        touched()
+        render()
+    }
+
+    fun backToQuickApps() {
+        timerPick = false
+        quickOpen = true
+        touched()
+        render()
+    }
+
+    /** Starts an island timer for [minutes]; it counts down in the pill and buzzes when done. */
+    fun startTimer(minutes: Int) {
+        timerPick = false
+        quickOpen = false
+        timerDone = false
+        stopBuzz()
+        val end = System.currentTimeMillis() + minutes * 60_000L
+        upsertLive(OWN_TIMER_KEY, LiveKind.TIMER) { item ->
+            item.hasChrono = true
+            item.countDown = true
+            item.chronoBase = end
+            item.title = "Timer"
+            item.text = "$minutes min"
+            item.appName = "Dynamic Island"
+            item.pkg = packageName
+            item.icon = Panels.kindIcon(this, LiveKind.TIMER)
+            item.actions = listOf(NotifAction("Cancel", null, run = { cancelOwnTimer() }))
+        }
+        islandView?.tick()
+        // A real alarm too, so it still goes off with the screen dark (handlers pause in deep sleep).
+        try {
+            val am = getSystemService(ALARM_SERVICE) as android.app.AlarmManager
+            val show = PendingIntent.getActivity(
+                this, 4, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            am.setAlarmClock(android.app.AlarmManager.AlarmClockInfo(end, show), timerAlarmIntent())
+        } catch (e: Exception) {
+            Diag.add("Timer alarm failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    private fun timerAlarmIntent(): PendingIntent = PendingIntent.getBroadcast(
+        this, 5, Intent(this, TimerReceiver::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+
+    fun cancelOwnTimer() {
+        stopBuzz()
+        timerDone = false
+        try { getSystemService(android.app.NotificationManager::class.java)?.cancel(TIMER_NOTIF) } catch (e: Exception) { }
+        try { (getSystemService(ALARM_SERVICE) as android.app.AlarmManager).cancel(timerAlarmIntent()) } catch (e: Exception) { }
+        removeLive(OWN_TIMER_KEY)
+    }
+
+    /** The timer's alarm went off (possibly with the screen dark). */
+    fun timerFired() = guard("timer") { checkOwnTimer(System.currentTimeMillis() + 500L) }
+
+    /** Called every second while our timer runs. */
+    private fun checkOwnTimer(now: Long) {
+        val t = lives[OWN_TIMER_KEY] ?: return
+        if (timerDone || !t.countDown || now < t.chronoBase) return
+        timerDone = true
+        // Flip the island into "done" mode: alarm-style, pulsing, with a Stop button.
+        upsertLive(OWN_TIMER_KEY, LiveKind.ALARM, autoExpand = true) { item ->
+            item.hasChrono = false
+            item.title = "Timer done"
+            item.text = t.text
+            item.incoming = true
+            item.actions = listOf(NotifAction("Stop", null, run = { cancelOwnTimer() }))
+        }
+        expandedKey = OWN_TIMER_KEY
+        touched()
+        render()
+        buzz()
+        timerNotification(t.text)
+        // Give up after a minute so it can't buzz forever.
+        main.postDelayed({ if (timerDone) cancelOwnTimer() }, 60_000L)
+    }
+
+    private var vibrating = false
+
+    @Suppress("DEPRECATION")
+    private fun vibrator(): android.os.Vibrator? = try {
+        if (Build.VERSION.SDK_INT >= 31) {
+            (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager).defaultVibrator
+        } else {
+            getSystemService(VIBRATOR_SERVICE) as android.os.Vibrator
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun buzz() {
+        val v = vibrator() ?: return
+        try {
+            val pattern = longArrayOf(0, 350, 250, 350, 900)
+            v.vibrate(android.os.VibrationEffect.createWaveform(pattern, 0))
+            vibrating = true
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun stopBuzz() {
+        if (!vibrating) return
+        vibrating = false
+        try { vibrator()?.cancel() } catch (e: Exception) { }
+    }
+
+    /** A normal notification too, so the timer still makes a sound when the island is hidden. */
+    private fun timerNotification(label: String) {
+        try {
+            val nm = getSystemService(android.app.NotificationManager::class.java) ?: return
+            if (nm.getNotificationChannel(TIMER_CHANNEL) == null) {
+                val ch = android.app.NotificationChannel(TIMER_CHANNEL, "Timers", android.app.NotificationManager.IMPORTANCE_HIGH)
+                ch.enableVibration(false)
+                nm.createNotificationChannel(ch)
+            }
+            val open = PendingIntent.getActivity(
+                this, 3, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            val n = android.app.Notification.Builder(this, TIMER_CHANNEL)
+                .setSmallIcon(R.drawable.ic_timer)
+                .setContentTitle("Timer done")
+                .setContentText(label)
+                .setContentIntent(open)
+                .setAutoCancel(true)
+                .setCategory(android.app.Notification.CATEGORY_ALARM)
+                .build()
+            nm.notify(TIMER_NOTIF, n)
+        } catch (e: Exception) {
+        }
     }
 
     // ------------------------------------------------------------------ calls (phone state)
@@ -963,13 +1140,28 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     // ------------------------------------------------------------------ pop-outs
 
-    fun showToast(t: ToastItem) {
-        if (!::prefs.isInitialized || !prefs.getBoolean(P.ENABLED, true)) return
-        if (toast == null) {
+    fun showToast(t: ToastItem) = guard("pop-up") {
+        if (!::prefs.isInitialized || !prefs.getBoolean(P.ENABLED, true)) return@guard
+        val cur = toast
+        val tag = t.tag
+        if (tag != null) {
+            // Same kind of pop-up already up (volume being turned): update it in place.
+            if (cur?.tag == tag) {
+                toast = t
+                toastExpanded = false
+                main.removeCallbacks(toastEnd)
+                main.postDelayed(toastEnd, t.duration)
+                render()
+                return@guard
+            }
+            queue.removeAll { it.tag == tag }
+        }
+        if (cur == null) {
             toast = t
             main.removeCallbacks(toastEnd)
             main.postDelayed(toastEnd, t.duration)
             render()
+            if (prefs.getBoolean(P.HAPTICS, true) && t.style != ToastStyle.UNLOCK && screenOn) islandView?.tick()
         } else {
             queue.addLast(t)
             while (queue.size > 4) queue.removeFirst()
@@ -1096,46 +1288,65 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     // ------------------------------------------------------------------ ticking
 
+    /** Once a second while something is moving; every few seconds when the island is idle (battery). */
+    private fun tickInterval(): Long {
+        val busy = toast != null || expandedKey != null || quickOpen || timerPick || previewUntil != 0L ||
+            panel?.needsTick == true || lives.containsKey(OWN_TIMER_KEY)
+        return if (busy) 1000L else 4000L
+    }
+
     private val ticker = object : Runnable {
         override fun run() {
-            val now = System.currentTimeMillis()
-            val m = lives[MEDIA_KEY]
-            if (m != null && m.media?.playing != true && mediaPausedAt > 0L &&
-                now - mediaPausedAt > 90_000L && expandedKey != MEDIA_KEY
-            ) {
-                lives.remove(MEDIA_KEY)
-                render()
-            }
-            val ek = expandedKey
-            if (ek != null && now - lastTouch > 15_000L && lives[ek]?.incoming != true) collapse()
-            if (quickOpen && now - lastTouch > 8_000L) collapse()
-            if (toastExpanded && toast != null && now - lastTouch > 12_000L) nextToast()
-            if (previewUntil != 0L && now > previewUntil) {
-                previewUntil = 0L
-                render()
-            }
-            panel?.tick()
-            checkPrompts()
-            // Pick up the "Display over other apps" permission if it was just granted (or removed).
-            if (++probeCheck >= 3) {
-                probeCheck = 0
-                if (islandView != null) updateProbe()
-                // Start watching calls as soon as the "Calls" permission is given.
-                if (phoneCallback == null) registerPhoneState()
-            }
-            // Re-attach the notification listener if Android dropped it.
-            if (++rebindCheck >= 30) {
-                rebindCheck = 0
-                if (NotifListener.instance == null) {
-                    try {
-                        android.service.notification.NotificationListenerService.requestRebind(
-                            android.content.ComponentName(this@IslandService, NotifListener::class.java)
-                        )
-                    } catch (e: Exception) {
-                    }
-                }
-            }
-            main.postDelayed(this, 1000L)
+            guard("tick") { tickNow() }
+            if (screenOn) main.postDelayed(this, tickInterval())
+        }
+    }
+
+    private fun tickNow() {
+        val now = System.currentTimeMillis()
+        checkOwnTimer(now)
+        val m = lives[MEDIA_KEY]
+        if (m != null && m.media?.playing != true && mediaPausedAt > 0L &&
+            now - mediaPausedAt > 90_000L && expandedKey != MEDIA_KEY
+        ) {
+            lives.remove(MEDIA_KEY)
+            render()
+        }
+        val ek = expandedKey
+        if (ek != null && now - lastTouch > 15_000L && lives[ek]?.incoming != true) collapse()
+        if ((quickOpen || timerPick) && now - lastTouch > 8_000L) collapse()
+        if (toastExpanded && toast != null && now - lastTouch > 12_000L) nextToast()
+        if (previewUntil != 0L && now > previewUntil) {
+            previewUntil = 0L
+            render()
+        }
+        panel?.tick()
+        checkPrompts()
+        // Pick up the "Display over other apps" permission if it was just granted (or removed).
+        if (now - lastProbeCheck >= 3000L) {
+            lastProbeCheck = now
+            if (islandView != null) updateProbe()
+            // Start watching calls as soon as the "Calls" permission is given.
+            if (phoneCallback == null) registerPhoneState()
+        }
+        // Re-attach the notification listener if Android dropped it.
+        if (now - lastRebindCheck >= 30_000L) {
+            lastRebindCheck = now
+            if (NotifListener.instance == null) requestListenerRebind(this)
+        }
+    }
+
+    private fun onScreen(on: Boolean) {
+        if (on == screenOn) return
+        screenOn = on
+        main.removeCallbacks(ticker)
+        if (on) {
+            main.post(ticker)
+            if (NotifListener.instance == null) requestListenerRebind(this)
+            render(true)
+        } else {
+            collapse()
+            applyVisibility()
         }
     }
 
@@ -1158,8 +1369,12 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         )
         val list = Prompts.load(prefs)
         var changed = false
+        val nowMin = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
         for (p in list) {
-            if (p.time == hhmm && p.lastShown != today) {
+            // Due now, or within the last half hour (the screen may have been off at the exact minute).
+            val parts = p.time.split(':')
+            val due = if (parts.size == 2) (parts[0].toIntOrNull() ?: -1) * 60 + (parts[1].toIntOrNull() ?: 0) else -1
+            if (due >= 0 && nowMin - due in 0..30 && p.lastShown != today) {
                 p.lastShown = today
                 changed = true
                 showPrompt(p.emoji, p.text)
@@ -1176,9 +1391,12 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         override fun onReceive(context: Context?, intent: Intent?) {
             val i = intent ?: return
             when (i.action) {
+                Intent.ACTION_SCREEN_OFF -> onScreen(false)
+                Intent.ACTION_SCREEN_ON -> onScreen(true)
                 Intent.ACTION_POWER_CONNECTED ->
                     if (feature(P.F_CHARGING)) main.postDelayed({ chargingToast() }, 400L)
                 Intent.ACTION_BATTERY_CHANGED -> onBattery(i)
+                "android.media.VOLUME_CHANGED_ACTION" -> onVolume(i)
                 AudioManager.RINGER_MODE_CHANGED_ACTION ->
                     onRinger(i.getIntExtra(AudioManager.EXTRA_RINGER_MODE, -1))
                 BluetoothDevice.ACTION_ACL_CONNECTED -> onBluetooth(i)
@@ -1217,6 +1435,9 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         f.addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
         f.addAction(Intent.ACTION_USER_PRESENT)
         f.addAction(Intent.ACTION_HEADSET_PLUG)
+        f.addAction(Intent.ACTION_SCREEN_ON)
+        f.addAction(Intent.ACTION_SCREEN_OFF)
+        f.addAction("android.media.VOLUME_CHANGED_ACTION")
         val pf = IntentFilter(ACTION_PROMPT)
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(systemReceiver, f, Context.RECEIVER_EXPORTED)
@@ -1236,11 +1457,60 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     private fun chargingToast() {
         val lvl = batteryLevel().coerceIn(0, 100)
+        val plugged = try {
+            registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+        } catch (e: Exception) {
+            0
+        }
+        val title = when (plugged) {
+            BatteryManager.BATTERY_PLUGGED_WIRELESS -> "Wireless Charging"
+            BatteryManager.BATTERY_PLUGGED_USB -> "Charging · USB"
+            else -> "Charging"
+        }
         showToast(
             ToastItem(
-                ToastStyle.BANNER, title = "Charging", value = "$lvl%",
+                ToastStyle.BANNER, title = title, value = "$lvl%",
                 accent = C.GREEN,
                 battery = lvl, charging = true, duration = 3200L
+            )
+        )
+    }
+
+    /** Volume keys: a little level bar in the island (the system's own slider still shows). */
+    private fun onVolume(i: Intent) {
+        if (!feature(P.F_VOLUME) || !screenOn) return
+        val stream = i.getIntExtra("android.media.EXTRA_VOLUME_STREAM_TYPE", -1)
+        val value = i.getIntExtra("android.media.EXTRA_VOLUME_STREAM_VALUE", -1)
+        val prev = i.getIntExtra("android.media.EXTRA_PREV_VOLUME_STREAM_VALUE", -1)
+        if (value < 0 || value == prev) return
+        if (stream != AudioManager.STREAM_MUSIC && stream != AudioManager.STREAM_RING &&
+            stream != AudioManager.STREAM_NOTIFICATION && stream != AudioManager.STREAM_VOICE_CALL
+        ) return
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        val max = (try { am.getStreamMaxVolume(stream) } catch (e: Exception) { 15 }).coerceAtLeast(1)
+        val level = value.toFloat() / max
+        val title = when (stream) {
+            AudioManager.STREAM_RING, AudioManager.STREAM_NOTIFICATION -> "Ringer"
+            AudioManager.STREAM_VOICE_CALL -> "Call"
+            else -> "Volume"
+        }
+        showToast(
+            ToastItem(
+                ToastStyle.BANNER, title = title, value = "",
+                icon = tinted(if (value == 0) R.drawable.ic_volume_off else R.drawable.ic_volume, android.graphics.Color.WHITE),
+                accent = android.graphics.Color.WHITE, level = level, duration = 1400L, tag = "volume"
+            )
+        )
+    }
+
+    /** Do Not Disturb turned on or off (reported by the notification listener). */
+    fun onDnd(on: Boolean) {
+        if (!feature(P.F_DND)) return
+        showToast(
+            ToastItem(
+                ToastStyle.BANNER, title = "Focus", value = if (on) "On" else "Off",
+                icon = tinted(R.drawable.ic_moon, android.graphics.Color.WHITE),
+                iconBg = if (on) C.PURPLE else C.CARD2, accent = if (on) C.PURPLE else C.GRAY, duration = 2400L
             )
         )
     }
@@ -1395,6 +1665,47 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             )
             "prompt" -> showPrompt("✨", "This is your Dynamic Island!")
             "unlock" -> showToast(ToastItem(ToastStyle.UNLOCK, title = "", duration = (1350 * animFactor()).toLong()))
+            "dnd" -> {
+                val on = prefs.getBoolean("demo_dnd", false)
+                prefs.edit().putBoolean("demo_dnd", !on).apply()
+                showToast(
+                    ToastItem(
+                        ToastStyle.BANNER, title = "Focus", value = if (!on) "On" else "Off",
+                        icon = tinted(R.drawable.ic_moon, android.graphics.Color.WHITE),
+                        iconBg = if (!on) C.PURPLE else C.CARD2, accent = if (!on) C.PURPLE else C.GRAY, duration = 2400L
+                    )
+                )
+            }
+            "volume" -> {
+                var step = 0
+                val steps = listOf(0.4f, 0.55f, 0.7f, 0.85f, 1f)
+                fun next() {
+                    if (step >= steps.size) return
+                    val lv = steps[step++]
+                    showToast(
+                        ToastItem(
+                            ToastStyle.BANNER, title = "Volume", icon = tinted(R.drawable.ic_volume, android.graphics.Color.WHITE),
+                            level = lv, duration = 1400L, tag = "volume"
+                        )
+                    )
+                    main.postDelayed({ next() }, 260L)
+                }
+                next()
+            }
+            "alarm" -> {
+                upsertLive("demo_alarm", LiveKind.ALARM, autoExpand = true) { item ->
+                    item.incoming = true
+                    item.title = "Alarm"
+                    item.text = "07:30 · Wake up"
+                    item.appName = "Clock"
+                    item.pkg = packageName
+                    item.actions = listOf(
+                        NotifAction("Snooze", null, run = { removeLive("demo_alarm") }),
+                        NotifAction("Stop", null, run = { removeLive("demo_alarm") })
+                    )
+                }
+                main.postDelayed({ removeLive("demo_alarm") }, 30_000L)
+            }
             "quick" -> {
                 quickOpen = true
                 touched()

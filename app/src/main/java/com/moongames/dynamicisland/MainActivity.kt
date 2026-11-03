@@ -34,7 +34,7 @@ import android.widget.Toast
 import java.util.Locale
 
 @Suppress("DEPRECATION")
-class MainActivity : Activity() {
+class MainActivity : Activity(), SharedPreferences.OnSharedPreferenceChangeListener {
 
     companion object {
         const val EXTRA_UPDATE = "do_update"
@@ -51,10 +51,18 @@ class MainActivity : Activity() {
     private lateinit var updateBar: ProgressBar
     private lateinit var updateButton: TextView
     private lateinit var promptList: LinearLayout
+    private lateinit var preview: IslandPreview
     private var latest: Updater.Release? = null
     private var lastCheck = 0L
     private var pickedTime = ""
+    private var statusTicker: Runnable? = null
 
+    /** Material You: the phone's own accent colour on Android 12+, iOS blue before that. */
+    private val accent: Int by lazy {
+        if (Build.VERSION.SDK_INT >= 31) {
+            try { getColor(android.R.color.system_accent1_400) } catch (e: Exception) { C.BLUE }
+        } else C.BLUE
+    }
     private val repoUrl: String get() = "https://github.com/" + BuildConfig.GITHUB_REPO
 
     // ------------------------------------------------------------------ lifecycle
@@ -76,7 +84,7 @@ class MainActivity : Activity() {
         scroll.setBackgroundColor(Color.BLACK)
         scroll.isVerticalScrollBarEnabled = false
         root = vbox()
-        root.setPadding(18.dp, 48.dp, 18.dp, 40.dp)
+        root.setPadding(16.dp, 48.dp, 16.dp, 40.dp)
         scroll.addView(root, ViewGroup.LayoutParams(MATCH, WRAP))
         setContentView(scroll)
         scroll.setOnApplyWindowInsetsListener { _, insets ->
@@ -90,12 +98,22 @@ class MainActivity : Activity() {
                 top = insets.systemWindowInsetTop
                 bottom = insets.systemWindowInsetBottom
             }
-            root.setPadding(18.dp, top + 20.dp, 18.dp, bottom + 40.dp)
+            root.setPadding(16.dp, top + 12.dp, 16.dp, bottom + 40.dp)
             insets
         }
 
         build()
         handleIntent(intent)
+        prefs.registerOnSharedPreferenceChangeListener(this)
+    }
+
+    override fun onDestroy() {
+        try { prefs.unregisterOnSharedPreferenceChangeListener(this) } catch (e: Exception) { }
+        super.onDestroy()
+    }
+
+    override fun onSharedPreferenceChanged(sp: SharedPreferences?, key: String?) {
+        if (key == P.WIDTH || key == P.HEIGHT || key == P.OFF_X || key == P.OFF_Y) preview.invalidate()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -107,14 +125,7 @@ class MainActivity : Activity() {
         super.onResume()
         visible = true
         // Android sometimes drops the notification listener (e.g. after an update); ask it back.
-        if (listenerOn() && NotifListener.instance == null) {
-            try {
-                android.service.notification.NotificationListenerService.requestRebind(
-                    ComponentName(this, NotifListener::class.java)
-                )
-            } catch (e: Exception) {
-            }
-        }
+        if (listenerOn() && NotifListener.instance == null) requestListenerRebind(this)
         refreshers.forEach { it() }
         statusTicker?.let {
             root.removeCallbacks(it)
@@ -143,11 +154,7 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------------ screen
 
     private fun build() {
-        root.addView(label("Dynamic Island", 34f, Color.WHITE, bold = true))
-        val sub = label("Version ${BuildConfig.VERSION_NAME} · tap the island to open the app, hold it to expand, swipe sideways to tuck it away", 14f, C.GRAY, lines = 3)
-        sub.setPadding(0, 8.dp, 0, 0)
-        root.addView(sub)
-
+        buildHero()
         buildSetup()
         buildTry()
         buildApps()
@@ -160,26 +167,75 @@ class MainActivity : Activity() {
         buildAbout()
     }
 
-    private fun buildSetup() {
-        val c = section("Setup")
-        val status = label("", 14f, C.GRAY, bold = true, lines = 3)
-        status.setPadding(0, 14.dp, 0, 4.dp)
-        c.addView(status)
-        val paintStatus = {
+    /** Title, live preview, status chip and the main on/off switch. */
+    private fun buildHero() {
+        val head = hbox()
+        head.setPadding(4.dp, 6.dp, 0, 0)
+        head.addView(label("Dynamic Island", 30f, Color.WHITE, bold = true), llp(0, WRAP, 1f))
+        val sw = Switch(this)
+        tintSwitch(sw)
+        sw.isChecked = prefs.getBoolean(P.ENABLED, true)
+        sw.setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(P.ENABLED, on).apply() }
+        head.addView(sw, llp(WRAP, WRAP))
+        root.addView(head, llp(MATCH, WRAP))
+
+        preview = IslandPreview(this, accent)
+        preview.roundCorners(26f.dpf)
+        preview.setOnClickListener {
+            preview.busy = !preview.busy
+            if (preview.busy) demo("notification")
+        }
+        root.addView(preview, llp(MATCH, 150.dp).apply { topMargin = 14.dp })
+
+        val chipRow = hbox()
+        chipRow.setPadding(2.dp, 12.dp, 2.dp, 0)
+        val chip = label("", 13f, Color.WHITE, bold = true, lines = 3)
+        chip.setPadding(12.dp, 7.dp, 12.dp, 7.dp)
+        chipRow.addView(chip, llp(WRAP, WRAP))
+        root.addView(chipRow, llp(MATCH, WRAP))
+        val paintChip = {
             val s = IslandService.instance
             val text = when {
                 s != null -> s.statusText()
                 a11yOn() -> "Switched on, but not running — turn the Island overlay off and on again"
-                else -> "Not running — turn on Island overlay below"
+                else -> "Not running — turn on Island overlay in Setup"
             }
-            status.text = "Status: $text"
-            status.setTextColor(if (text.startsWith("Running ✓")) C.GREEN else C.ORANGE)
+            val good = text.startsWith("Running ✓")
+            chip.text = "●  $text"
+            chip.background = roundRect(if (good) 0x2630D158 else 0x26FF9F0A, 50f.dpf)
+            chip.setTextColor(if (good) C.GREEN else C.ORANGE)
         }
-        refreshers += paintStatus
+        refreshers += paintChip
         statusTicker = Runnable {
-            paintStatus()
+            paintChip()
             if (visible) statusTicker?.let { root.postDelayed(it, 1500L) }
         }
+        root.addView(label(
+            "Tap the island to open · hold to expand · swipe sideways to tuck away · hold when idle for quick apps",
+            12.5f, C.GRAY, lines = 3
+        ).apply { setPadding(4.dp, 10.dp, 4.dp, 0) })
+    }
+
+    private fun setupSteps(): List<Pair<String, () -> Boolean>> {
+        val steps = mutableListOf<Pair<String, () -> Boolean>>(
+            "overlay" to { a11yOn() },
+            "notifications" to { listenerOn() },
+            "calls" to { granted(Manifest.permission.READ_PHONE_STATE) && granted(Manifest.permission.ANSWER_PHONE_CALLS) },
+            "battery" to { (getSystemService(POWER_SERVICE) as android.os.PowerManager).isIgnoringBatteryOptimizations(packageName) },
+            "install" to { packageManager.canRequestPackageInstalls() }
+        )
+        if (Build.VERSION.SDK_INT >= 33) steps += "alerts" to { granted(Manifest.permission.POST_NOTIFICATIONS) }
+        if (Build.VERSION.SDK_INT >= 31) steps += "bluetooth" to { granted(Manifest.permission.BLUETOOTH_CONNECT) }
+        return steps
+    }
+
+    private fun buildSetup() {
+        val steps = setupSteps()
+        val essentialsDone = a11yOn() && listenerOn()
+        val c = section("Setup", key = "setup", defaultOpen = !essentialsDone, forceOpen = !essentialsDone, badge = {
+            val done = steps.count { it.second() }
+            if (done == steps.size) "All done" else "$done of ${steps.size} done"
+        })
         statusRow(c, "Island overlay", "Accessibility service that draws the island over the status bar.", { a11yOn() }, "Turn on") {
             toast("Open \"Dynamic Island\" and switch it on")
             open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -195,13 +251,13 @@ class MainActivity : Activity() {
         refreshers += { help.visibility = if (a11yOn()) View.GONE else View.VISIBLE }
 
         divider(c)
-        statusRow(c, "Notification access", "For notifications, music, calls, timers and maps.", { listenerOn() }, "Allow") {
+        statusRow(c, "Notification access", "For notifications, music, calls, timers, alarms, Focus and maps.", { listenerOn() }, "Allow") {
             open(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
         }
         divider(c)
         statusRow(
             c, "Calls",
-            "Shows every call in the island (even when the phone app's notification isn't recognised) and makes Answer / Hang up work. Doesn't read numbers or call history.",
+            "Shows every call in the island and makes Answer / Hang up work. Doesn't read numbers or call history.",
             { granted(Manifest.permission.READ_PHONE_STATE) && granted(Manifest.permission.ANSWER_PHONE_CALLS) }, "Allow"
         ) {
             requestPermissions(arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.ANSWER_PHONE_CALLS), 3)
@@ -218,7 +274,7 @@ class MainActivity : Activity() {
         }
         if (Build.VERSION.SDK_INT >= 33) {
             divider(c)
-            statusRow(c, "Update alerts", "Lets the app tell you when a new version is ready.", { granted(Manifest.permission.POST_NOTIFICATIONS) }, "Allow") {
+            statusRow(c, "Update & timer alerts", "Lets the app tell you when a new version is ready, and ring when a timer ends.", { granted(Manifest.permission.POST_NOTIFICATIONS) }, "Allow") {
                 requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
             }
         }
@@ -238,31 +294,29 @@ class MainActivity : Activity() {
         }
     }
 
-    private var statusTicker: Runnable? = null
-
     private fun buildTry() {
-        val c = section("Try it")
+        val c = section("Try it", key = "try")
         val rows = listOf(
             listOf("Notification" to "notification", "Charging" to "charging", "Silent" to "silent"),
             listOf("Timer" to "timer", "Prompt" to "prompt", "Headphones" to "bluetooth"),
-            listOf("Call" to "call", "Unlock" to "unlock", "Quick apps" to "quick")
+            listOf("Call" to "call", "Unlock" to "unlock", "Quick apps" to "quick"),
+            listOf("Focus" to "dnd", "Volume" to "volume", "Alarm" to "alarm")
         )
         for ((ri, r) in rows.withIndex()) {
             val row = hbox()
-            row.setPadding(0, if (ri == 0) 12.dp else 8.dp, 0, if (ri == rows.size - 1) 12.dp else 0)
+            row.setPadding(0, if (ri == 0) 12.dp else 8.dp, 0, if (ri == rows.size - 1) 14.dp else 0)
             r.forEachIndexed { i, (labelText, key) ->
                 val b = button(labelText, C.CARD2) { demo(key) }
                 row.addView(b, llp(0, WRAP, 1f).apply { if (i > 0) marginStart = 8.dp })
             }
             c.addView(row)
         }
-        divider(c)
-        switchRow(c, "Island on", "Turn the whole thing on or off.", P.ENABLED, true)
     }
 
     private fun buildStatusBar() {
-        val c = section("Status bar icons (optional)")
+        val c = section("Status bar icons", key = "icons", defaultOpen = false)
         val sw = Switch(this)
+        tintSwitch(sw)
         sw.isChecked = prefs.getBoolean(P.NATIVE_ICONS, false) && StatusIcons.canWrite(this)
         sw.setOnCheckedChangeListener { b, on ->
             if (on && !StatusIcons.canWrite(this)) {
@@ -281,9 +335,9 @@ class MainActivity : Activity() {
     }
 
     private fun buildApps() {
-        val c = section("Apps & notifications")
+        val c = section("Apps & notifications", key = "apps")
         val count = label("", 13f, C.GRAY, lines = 2)
-        val chooseBtn = button("Choose", C.BLUE) { open(Intent(this, AppsActivity::class.java)) }
+        val chooseBtn = button("Choose", accent) { open(Intent(this, AppsActivity::class.java)) }
         val v = vbox()
         v.setPadding(0, 12.dp, 0, 12.dp)
         val h = hbox()
@@ -310,14 +364,12 @@ class MainActivity : Activity() {
             c, "Swipe away clears it",
             "Swiping a notification off the island also clears it from the notification shade.", P.SWIPE_CLEARS, true
         )
-        c.addView(label(
-            "Gestures: tap to open · touch and hold to expand (and see Reply) · swipe sideways to dismiss · swipe up to hide.",
-            12.5f, C.GRAY, lines = 4
-        ).apply { setPadding(0, 4.dp, 0, 14.dp) })
+        divider(c)
+        sliderRow(c, "Pop-up time", P.TOAST_SECS, 2, 10, 4, " s")
     }
 
     private fun buildFeatures() {
-        val c = section("What the island shows")
+        val c = section("What the island shows", key = "features")
         P.FEATURES.forEachIndexed { i, f ->
             if (i > 0) divider(c)
             switchRow(c, f.label, f.desc, f.key, true)
@@ -325,7 +377,10 @@ class MainActivity : Activity() {
     }
 
     private fun buildLook() {
-        val c = section("Size & position")
+        val c = section("Look & feel", key = "look")
+        c.addView(label("Drag the sliders and watch the preview at the top.", 13f, C.GRAY, lines = 2).apply {
+            setPadding(0, 12.dp, 0, 0)
+        })
         sliderRow(c, "Width", P.WIDTH, 50, 220, AutoSize.widthDp(this), " dp")
         divider(c)
         sliderRow(c, "Height", P.HEIGHT, 18, 50, AutoSize.heightDp(this), " dp")
@@ -334,14 +389,12 @@ class MainActivity : Activity() {
         divider(c)
         sliderRow(c, "Move left / right", P.OFF_X, -160, 160, 0, "")
         divider(c)
-        sliderRow(c, "Pop-up time", P.TOAST_SECS, 2, 10, 4, " s")
-        divider(c)
         val seg = hbox()
         val names = listOf("Slow", "Normal", "Fast")
         val btns = names.map { button(it, C.CARD2) {} }
         fun paint() {
             val cur = prefs.getInt(P.ANIM_SPEED, 1)
-            btns.forEachIndexed { i, b -> b.background = roundRect(if (i == cur) C.BLUE else C.CARD2, 50f.dpf) }
+            btns.forEachIndexed { i, b -> b.background = roundRect(if (i == cur) accent else C.CARD2, 50f.dpf) }
         }
         btns.forEachIndexed { i, b ->
             b.setOnClickListener {
@@ -359,19 +412,27 @@ class MainActivity : Activity() {
         animRow.addView(seg, llp(WRAP, WRAP).apply { topMargin = 10.dp })
         c.addView(animRow)
         divider(c)
+        switchRow(c, "Haptic tick", "A soft tap you feel when something pops out of the island.", P.HAPTICS, true)
+        divider(c)
         switchRow(c, "Show pill when idle", "Keep the black pill around the camera even when nothing is happening.", P.IDLE_VISIBLE, true)
         divider(c)
         switchRow(c, "Hide in full-screen apps", "Gets out of the way of videos and games.", P.HIDE_FULLSCREEN, true)
         divider(c)
-        val reset = button("Reset size & position", C.CARD2) {
+        val btnRow = hbox()
+        btnRow.setPadding(0, 12.dp, 0, 12.dp)
+        btnRow.addView(button("iPhone size", C.CARD2) {
+            prefs.edit().putInt(P.WIDTH, 126).putInt(P.HEIGHT, 37).apply()
+            recreate()
+        })
+        btnRow.addView(button("Reset", C.CARD2) {
             prefs.edit().remove(P.WIDTH).remove(P.HEIGHT).remove(P.OFF_X).remove(P.OFF_Y).apply()
             recreate()
-        }
-        c.addView(reset, llp(WRAP, WRAP).apply { topMargin = 12.dp; bottomMargin = 12.dp })
+        }, llp(WRAP, WRAP).apply { marginStart = 8.dp })
+        c.addView(btnRow)
     }
 
     private fun buildPrompts() {
-        val c = section("Custom prompts")
+        val c = section("Custom prompts", key = "prompts")
         c.addView(label("Show your own messages in the island — right now, pinned so they stay, or every day at a set time.", 13f, C.GRAY, lines = 4).apply {
             setPadding(0, 12.dp, 0, 10.dp)
         })
@@ -399,7 +460,7 @@ class MainActivity : Activity() {
             true
         }
         actions.addView(timeBtn)
-        val add = button("Add prompt", C.BLUE) {
+        val add = button("Add prompt", accent) {
             val t = text.text.toString().trim()
             if (t.isEmpty()) {
                 toast("Type a message first")
@@ -446,7 +507,7 @@ class MainActivity : Activity() {
                 setPadding(0, 3.dp, 0, 8.dp)
             })
             val btns = hbox()
-            btns.addView(button("Show", C.BLUE) {
+            btns.addView(button("Show", accent) {
                 val s = IslandService.instance
                 if (s == null) toast("Turn on the island overlay first (Setup)") else s.showPrompt(p.emoji, p.text)
             })
@@ -468,7 +529,7 @@ class MainActivity : Activity() {
     }
 
     private fun buildUpdates() {
-        val c = section("Updates")
+        val c = section("Updates", key = "updates", badge = { "v${BuildConfig.VERSION_NAME}" })
         updateStatus = label("Version ${BuildConfig.VERSION_NAME}", 15.5f, Color.WHITE, lines = 3)
         updateStatus.setPadding(0, 14.dp, 0, 0)
         c.addView(updateStatus)
@@ -478,10 +539,10 @@ class MainActivity : Activity() {
         c.addView(updateNotes)
         updateBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
         updateBar.max = 100
-        updateBar.progressTintList = ColorStateList.valueOf(C.BLUE)
+        updateBar.progressTintList = ColorStateList.valueOf(accent)
         updateBar.visibility = View.GONE
         c.addView(updateBar, llp(MATCH, WRAP).apply { topMargin = 8.dp })
-        updateButton = button("Check for updates", C.BLUE) {
+        updateButton = button("Check for updates", accent) {
             val l = latest
             if (l != null && l.versionCode > BuildConfig.VERSION_CODE) startInstall(l) else checkForUpdates(true)
         }
@@ -495,7 +556,7 @@ class MainActivity : Activity() {
     }
 
     private fun buildDiagnostics() {
-        val c = section("Diagnostics")
+        val c = section("Diagnostics", key = "diag", defaultOpen = false)
         c.addView(label(
             "What the island has seen recently (app names and types only, never message text). If something doesn't show, send a screenshot of this.",
             13f, C.GRAY, lines = 4
@@ -520,11 +581,15 @@ class MainActivity : Activity() {
     }
 
     private fun buildAbout() {
-        val c = section("About")
-        val link = label(repoUrl.removePrefix("https://"), 14f, C.BLUE, lines = 2)
-        link.setPadding(0, 14.dp, 0, 14.dp)
+        val c = section("About", key = "about", defaultOpen = false)
+        val link = label(repoUrl.removePrefix("https://"), 14f, accent, lines = 2)
+        link.setPadding(0, 14.dp, 0, 6.dp)
         link.setOnClickListener { open(Intent(Intent.ACTION_VIEW, Uri.parse(repoUrl))) }
         c.addView(link)
+        c.addView(label(
+            "Ideas borrowed from dynamicSpot, SmartIsland, Expressive Cutout and Material You Dynamic Island. Built with no ads, no tracking and no internet use except checking GitHub for updates.",
+            12.5f, C.GRAY, lines = 5
+        ).apply { setPadding(0, 0, 0, 14.dp) })
     }
 
     // ------------------------------------------------------------------ updates
@@ -605,7 +670,7 @@ class MainActivity : Activity() {
             .setMessage(
                 "1. On this phone, turn on Developer options → USB debugging.\n" +
                     "2. Plug it into a computer with Android platform-tools (ADB).\n" +
-                    "3. Run:\n\n$cmd\n\n4. Come back and switch Native mode on."
+                    "3. Run:\n\n$cmd\n\n4. Come back and switch Hide system icons on."
             )
             .setPositiveButton("Copy command") { _, _ ->
                 (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("adb", cmd))
@@ -644,14 +709,56 @@ class MainActivity : Activity() {
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
-    private fun section(title: String): LinearLayout {
-        val h = label(title.uppercase(Locale.getDefault()), 13f, C.GRAY, bold = true)
-        h.setPadding(6.dp, 26.dp, 0, 8.dp)
-        root.addView(h)
+    private fun tintSwitch(sw: Switch) {
+        try {
+            val on = accent
+            val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+            sw.thumbTintList = ColorStateList(states, intArrayOf(Color.WHITE, 0xFFE5E5EA.toInt()))
+            sw.trackTintList = ColorStateList(states, intArrayOf(on, 0xFF48484A.toInt()))
+        } catch (e: Exception) {
+        }
+    }
+
+    /**
+     * A card with a tappable header. Tap the title to fold the card away; the choice is remembered.
+     * [badge] is a short note on the right of the title ("3 of 7 done", "v1.8").
+     */
+    private fun section(
+        title: String, key: String, defaultOpen: Boolean = true, forceOpen: Boolean = false, badge: (() -> String)? = null
+    ): LinearLayout {
+        val prefKey = "sec_$key"
+        var open = forceOpen || prefs.getBoolean(prefKey, defaultOpen)
+
+        val header = hbox()
+        header.setPadding(8.dp, 24.dp, 6.dp, 8.dp)
+        header.addView(label(title.uppercase(Locale.getDefault()), 13f, C.GRAY, bold = true), llp(0, WRAP, 1f))
+        val badgeView = label("", 12f, accent, bold = true)
+        badgeView.setPadding(0, 0, 8.dp, 0)
+        header.addView(badgeView, llp(WRAP, WRAP))
+        val chevron = label("▾", 14f, C.GRAY, bold = true)
+        header.addView(chevron, llp(WRAP, WRAP))
+        root.addView(header, llp(MATCH, WRAP))
+
         val card = vbox()
-        card.background = roundRect(C.CARD, 20f.dpf)
+        card.background = roundRect(C.CARD, 22f.dpf)
         card.setPadding(16.dp, 0, 16.dp, 0)
         root.addView(card, llp(MATCH, WRAP))
+
+        fun apply() {
+            card.visibility = if (open) View.VISIBLE else View.GONE
+            chevron.rotation = if (open) 0f else -90f
+        }
+        apply()
+        header.setOnClickListener {
+            open = !open
+            prefs.edit().putBoolean(prefKey, open).apply()
+            apply()
+        }
+        if (badge != null) {
+            val r = { badgeView.text = badge() }
+            refreshers += r
+            r()
+        }
         return card
     }
 
@@ -700,9 +807,11 @@ class MainActivity : Activity() {
 
     private fun statusRow(card: LinearLayout, title: String, sub: String, ok: () -> Boolean, action: String, onClick: () -> Unit) {
         val right = FrameLayout(this)
-        val okLabel = label("✓ On", 14f, C.GREEN, bold = true)
-        val btn = button(action, C.BLUE, onClick)
-        right.addView(okLabel, flp(WRAP, WRAP, Gravity.CENTER))
+        val okLabel = label("✓", 16f, C.GREEN, bold = true)
+        okLabel.gravity = Gravity.CENTER
+        okLabel.background = roundRect(0x2630D158, 50f.dpf)
+        val btn = button(action, accent, onClick)
+        right.addView(okLabel, flp(32.dp, 32.dp, Gravity.CENTER))
         right.addView(btn, flp(WRAP, WRAP, Gravity.CENTER))
         row(card, title, sub, right)
         val r = {
@@ -716,6 +825,7 @@ class MainActivity : Activity() {
 
     private fun switchRow(card: LinearLayout, title: String, sub: String?, key: String, def: Boolean) {
         val sw = Switch(this)
+        tintSwitch(sw)
         sw.isChecked = prefs.getBoolean(key, def)
         sw.setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(key, on).apply() }
         row(card, title, sub, sw)
@@ -732,7 +842,7 @@ class MainActivity : Activity() {
         val sb = SeekBar(this)
         sb.max = max - min
         sb.progress = prefs.getInt(key, def) - min
-        sb.progressTintList = ColorStateList.valueOf(C.BLUE)
+        sb.progressTintList = ColorStateList.valueOf(accent)
         sb.thumbTintList = ColorStateList.valueOf(Color.WHITE)
         sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar?, progress: Int, fromUser: Boolean) {

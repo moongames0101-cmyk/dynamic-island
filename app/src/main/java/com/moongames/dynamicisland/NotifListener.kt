@@ -34,14 +34,30 @@ class NotifListener : NotificationListenerService() {
     private var media: MediaTracker? = null
     private val lastAlert = HashMap<String, Long>()
     private val lastContent = HashMap<String, String>()
+    private var dndOn: Boolean? = null
 
     override fun onListenerConnected() {
         super.onListenerConnected()
         instance = this
+        Diag.add("Notifications connected")
         val m = MediaTracker(this)
         media = m
         m.start()
+        dndOn = try {
+            currentInterruptionFilter != NotificationListenerService.INTERRUPTION_FILTER_ALL
+        } catch (e: Exception) {
+            null
+        }
         resync()
+    }
+
+    override fun onInterruptionFilterChanged(filter: Int) {
+        super.onInterruptionFilterChanged(filter)
+        val on = filter != NotificationListenerService.INTERRUPTION_FILTER_ALL &&
+            filter != NotificationListenerService.INTERRUPTION_FILTER_UNKNOWN
+        val prev = dndOn
+        dndOn = on
+        if (prev != null && prev != on) IslandService.instance?.onDnd(on)
     }
 
     override fun onListenerDisconnected() {
@@ -59,7 +75,7 @@ class NotifListener : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?, rankingMap: RankingMap?) {
-        if (sbn != null) handle(sbn, false)
+        if (sbn != null) safeHandle(sbn, false)
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
@@ -67,10 +83,20 @@ class NotifListener : NotificationListenerService() {
         IslandService.instance?.removeLive(s.key)
     }
 
+    /** One strange notification must never crash the listener (that would silence all of them). */
+    private fun safeHandle(sbn: StatusBarNotification, initial: Boolean) {
+        try {
+            handle(sbn, initial)
+        } catch (e: Exception) {
+            android.util.Log.e("Island", "Problem reading a notification", e)
+            Diag.add("Problem reading a notification from ${sbn.packageName}: ${e.javaClass.simpleName}")
+        }
+    }
+
     /** Re-sends everything currently showing (used when the island service starts). */
     fun resync() {
         try {
-            activeNotifications?.forEach { handle(it, true) }
+            activeNotifications?.forEach { safeHandle(it, true) }
         } catch (e: Exception) {
         }
         media?.publish()
@@ -135,8 +161,12 @@ class NotifListener : NotificationListenerService() {
         val isCall = cat == "call" || template.contains("CallStyle") || (dialer && ongoing)
         val incoming = isCall && (callType == 1 || (!showChrono && n.fullScreenIntent != null))
 
+        // A ringing alarm: Clock posts it with a full-screen intent. ("Upcoming alarm" reminders don't have one.)
+        val isAlarm = cat == "alarm" && n.fullScreenIntent != null && !isCall
+
         var kind: LiveKind? = when {
             isCall && (ongoing || callType != 0 || n.fullScreenIntent != null) -> LiveKind.CALL
+            isAlarm -> LiveKind.ALARM
             cat == "navigation" && ongoing -> LiveKind.NAV
             showChrono && ongoing -> LiveKind.TIMER
             ongoing && svc.liveKind(key) == LiveKind.TIMER -> LiveKind.TIMER
@@ -145,6 +175,7 @@ class NotifListener : NotificationListenerService() {
         }
         val featureKey = when (kind) {
             LiveKind.CALL -> P.F_CALLS
+            LiveKind.ALARM -> P.F_ALARMS
             LiveKind.NAV -> P.F_NAVIGATION
             LiveKind.TIMER -> P.F_TIMERS
             LiveKind.PROGRESS -> P.F_PROGRESS
@@ -187,8 +218,9 @@ class NotifListener : NotificationListenerService() {
                 if (t == null || t.isEmpty()) null else NotifAction(t, a.actionIntent)
             }?.take(3) ?: emptyList()
             val k: LiveKind = kind
+            val wantsYou = incoming || k == LiveKind.ALARM
             if (!initial && svc.liveKind(key) == null) diag(pkg, n, cat, template, "→ ${k.name.lowercase()}" + if (incoming) " (incoming)" else "")
-            svc.upsertLive(key, k, autoExpand = incoming && !initial) { item ->
+            svc.upsertLive(key, k, autoExpand = wantsYou && !initial) { item ->
                 item.pkg = pkg
                 item.appName = appName
                 item.title = title
@@ -201,7 +233,7 @@ class NotifListener : NotificationListenerService() {
                 item.accent = if (n.color != 0) n.color else Panels.kindColor(k)
                 item.contentIntent = n.contentIntent
                 item.actions = actions
-                item.incoming = incoming
+                item.incoming = incoming || k == LiveKind.ALARM
                 item.notifKey = key
                 item.autoCancel = autoCancel
             }
