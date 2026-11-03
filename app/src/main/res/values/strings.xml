@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Dynamic Island</string>
+    <string name="a11y_description">Draws the Dynamic Island at the top of your screen and covers the status bar icons. It only looks at which windows are open (to hide itself when you pull down notifications or watch full-screen video). It does not read what you type or what is on screen.</string>
+</resources>
