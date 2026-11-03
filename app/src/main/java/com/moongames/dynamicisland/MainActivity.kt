@@ -106,6 +106,15 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         visible = true
+        // Android sometimes drops the notification listener (e.g. after an update); ask it back.
+        if (listenerOn() && NotifListener.instance == null) {
+            try {
+                android.service.notification.NotificationListenerService.requestRebind(
+                    ComponentName(this, NotifListener::class.java)
+                )
+            } catch (e: Exception) {
+            }
+        }
         refreshers.forEach { it() }
         statusTicker?.let {
             root.removeCallbacks(it)
@@ -231,30 +240,7 @@ class MainActivity : Activity() {
     }
 
     private fun buildStatusBar() {
-        val c = section("Status bar")
-        switchRow(
-            c, "Hide status bar icons",
-            "Covers the top bar in black and shows only the time, iPhone-style. Swiping down still opens notifications.",
-            P.HIDE_ICONS, true
-        )
-        divider(c)
-
-        val seg = hbox()
-        val leftBtn = button("Left", C.CARD2) {}
-        val rightBtn = button("Right", C.CARD2) {}
-        fun paint() {
-            val right = prefs.getBoolean(P.CLOCK_RIGHT, false)
-            leftBtn.background = roundRect(if (!right) C.BLUE else C.CARD2, 50f.dpf)
-            rightBtn.background = roundRect(if (right) C.BLUE else C.CARD2, 50f.dpf)
-        }
-        leftBtn.setOnClickListener { prefs.edit().putBoolean(P.CLOCK_RIGHT, false).apply(); paint() }
-        rightBtn.setOnClickListener { prefs.edit().putBoolean(P.CLOCK_RIGHT, true).apply(); paint() }
-        seg.addView(leftBtn)
-        seg.addView(rightBtn, llp(WRAP, WRAP).apply { marginStart = 6.dp })
-        paint()
-        row(c, "Time position", null, seg)
-        divider(c)
-
+        val c = section("Status bar icons (optional)")
         val sw = Switch(this)
         sw.isChecked = prefs.getBoolean(P.NATIVE_ICONS, false) && StatusIcons.canWrite(this)
         sw.setOnCheckedChangeListener { b, on ->
@@ -267,8 +253,8 @@ class MainActivity : Activity() {
             StatusIcons.apply(this, on)
         }
         row(
-            c, "Native mode (advanced)",
-            "Hides Android's real status bar icons instead of covering them (notification icons stay). Needs a one-time command from a computer.",
+            c, "Hide system icons",
+            "Removes Android's own Wi-Fi, signal, battery and sound icons (the time stays, nothing is covered). Needs a one-time command from a computer.",
             sw
         )
     }
@@ -283,9 +269,9 @@ class MainActivity : Activity() {
 
     private fun buildLook() {
         val c = section("Size & position")
-        sliderRow(c, "Width", P.WIDTH, 60, 220, 108, " dp")
+        sliderRow(c, "Width", P.WIDTH, 50, 220, AutoSize.widthDp(this), " dp")
         divider(c)
-        sliderRow(c, "Height", P.HEIGHT, 20, 50, 32, " dp")
+        sliderRow(c, "Height", P.HEIGHT, 18, 50, AutoSize.heightDp(this), " dp")
         divider(c)
         sliderRow(c, "Move up / down", P.OFF_Y, -30, 60, 0, "")
         divider(c)

@@ -28,6 +28,7 @@ class NotifListener : NotificationListenerService() {
 
     private var media: MediaTracker? = null
     private val lastAlert = HashMap<String, Long>()
+    private val lastContent = HashMap<String, String>()
 
     override fun onListenerConnected() {
         super.onListenerConnected()
@@ -181,27 +182,34 @@ class NotifListener : NotificationListenerService() {
 
         if (initial || ongoing || !svc.feature(P.F_NOTIFICATIONS)) return
         if ((n.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return
-        if (title.isEmpty() && body.isEmpty()) return
+        if (title.isEmpty() && body.isEmpty()) {
+            body = n.tickerText?.toString()?.trim() ?: ""
+            if (body.isEmpty()) return
+        }
 
+        // Show every app, including "silent" ones. Only skip notifications that are
+        // completely hidden (importance "min" / blocked).
         val ranking = Ranking()
         val ranked = try {
             currentRanking?.getRanking(key, ranking) == true
         } catch (e: Exception) {
             false
         }
-        if (ranked) {
-            if (ranking.importance < NotificationManager.IMPORTANCE_DEFAULT) return
-            if (!ranking.matchesInterruptionFilter()) return
-        }
+        if (ranked && ranking.importance < NotificationManager.IMPORTANCE_LOW) return
 
+        // A chat that adds a new message keeps the same key: show it again whenever the text
+        // changes, but not for silent re-posts of the same content.
+        val signature = "$title\u0000$body"
         val now = System.currentTimeMillis()
         val prev = lastAlert[key]
-        if (prev != null) {
-            if (now - prev < 2000L) return
-            if ((n.flags and Notification.FLAG_ONLY_ALERT_ONCE) != 0) return
-        }
+        if (prev != null && now - prev < 1500L) return
+        if (lastContent[key] == signature && prev != null && now - prev < 10 * 60 * 1000L) return
         lastAlert[key] = now
-        if (lastAlert.size > 200) lastAlert.clear()
+        lastContent[key] = signature
+        if (lastAlert.size > 300) {
+            lastAlert.clear()
+            lastContent.clear()
+        }
 
         val contentIntent = n.contentIntent
         svc.showToast(

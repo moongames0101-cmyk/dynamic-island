@@ -12,8 +12,6 @@ class Feature(val key: String, val label: String, val desc: String)
 
 object P {
     const val ENABLED = "enabled"
-    const val HIDE_ICONS = "hide_icons"
-    const val CLOCK_RIGHT = "clock_right"
     const val NATIVE_ICONS = "native_icons"
     const val SAVED_BLACKLIST = "saved_blacklist"
     const val WIDTH = "island_w"
@@ -71,6 +69,20 @@ object Prefs {
             ))
         }
     }
+}
+
+/** Default island size: about as tall as the status bar, iPhone proportions, hugging the camera. */
+object AutoSize {
+    @android.annotation.SuppressLint("DiscouragedApi", "InternalInsetResource")
+    fun heightDp(ctx: Context): Int {
+        val res = ctx.resources
+        val id = res.getIdentifier("status_bar_height", "dimen", "android")
+        val px = if (id > 0) res.getDimensionPixelSize(id) else 0
+        val dp = if (px > 0) Math.round(px / res.displayMetrics.density) else 28
+        return (dp - 3).coerceIn(24, 34)
+    }
+
+    fun widthDp(ctx: Context): Int = Math.round(heightDp(ctx) * 3.3f)
 }
 
 class Prompt(val id: Long, var text: String, var emoji: String, var time: String, var lastShown: String)

@@ -54,8 +54,6 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     private var islandView: IslandView? = null
     private var islandLp: WindowManager.LayoutParams? = null
-    private var coverView: CoverView? = null
-    private var coverLp: WindowManager.LayoutParams? = null
     private var probeView: View? = null
 
     val lives = LinkedHashMap<String, LiveItem>()
@@ -70,6 +68,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     private var shadeWhy = ""
     private var lastError: String? = null
     private var probeCheck = 0
+    private var rebindCheck = 25
     private var landscape = false
     private var islandShown = true
     private var mediaPausedAt = 0L
@@ -152,11 +151,10 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             try { (getSystemService(CAMERA_SERVICE) as CameraManager).unregisterTorchCallback(cb) } catch (e: Exception) { }
         }
         torchCallback = null
-        for (v in listOf<View?>(islandView, coverView, probeView)) {
+        for (v in listOf<View?>(islandView, probeView)) {
             if (v != null) try { wm.removeViewImmediate(v) } catch (e: Exception) { }
         }
         islandView = null
-        coverView = null
         probeView = null
         panel = null
         stateId = ""
@@ -168,7 +166,6 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         main.postDelayed({
             computePosition()
             pushIslandLayout()
-            updateCover()
             render(true)
         }, 300L)
     }
@@ -179,10 +176,8 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
                 previewUntil = System.currentTimeMillis() + 2500L
                 computePosition()
                 pushIslandLayout()
-                updateCover()
                 render(true)
             }
-            P.HIDE_ICONS, P.CLOCK_RIGHT, P.NATIVE_ICONS -> updateCover()
             P.PINNED, P.PROMPTS, P.F_PROMPTS -> {
                 syncPinned()
                 render()
@@ -198,9 +193,11 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     // ------------------------------------------------------------------ windows
 
     private fun overlayParams(w: Int, h: Int, touchable: Boolean): WindowManager.LayoutParams {
+        // Hardware acceleration gives smooth animations, clean rounded clipping and blur.
         var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
         flags = flags or if (touchable) {
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
         } else {
@@ -225,15 +222,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     @Suppress("DEPRECATION")
     private fun addWindows() {
-        // 1. Black strip over the status bar (below the island).
-        val cv = CoverView(this)
-        val clp = overlayParams(WindowManager.LayoutParams.MATCH_PARENT, statusBarHeight(), false)
-        clp.gravity = Gravity.TOP or Gravity.START
-        wm.addView(cv, clp)
-        coverView = cv
-        coverLp = clp
-
-        // 2. The island itself.
+        // 1. The island itself.
         val iv = IslandView(this, this)
         val ilp = overlayParams(1, 1, true)
         ilp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
@@ -241,9 +230,9 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         islandView = iv
         computePosition()
         wm.addView(iv, ilp)
-        updateCover()
+        applyVisibility()
 
-        // 3. Full-screen detector (optional).
+        // 2. Full-screen detector (optional).
         updateProbe()
     }
 
@@ -310,7 +299,9 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         if (landscape) why += "phone is sideways"
         if (shadeOpen) why += "notification shade open" + (if (shadeWhy.isNotEmpty()) " ($shadeWhy)" else "")
         if (fullscreen) why += "full-screen app"
-        return if (why.isEmpty()) "Running ✓ — island is showing" else "Running, hidden because: " + why.joinToString(", ")
+        if (why.isNotEmpty()) return "Running, hidden because: " + why.joinToString(", ")
+        return if (NotifListener.instance != null) "Running ✓ — island showing, notifications connected"
+        else "Running, but notifications aren't connected — turn Notification access off and on"
     }
 
     private fun pushIslandLayout() {
@@ -366,7 +357,11 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         return h
     }
 
-    private fun geo(): Geo = Geo(prefs.getInt(P.WIDTH, 108).dp, prefs.getInt(P.HEIGHT, 32).dp, screenWidth())
+    private fun geo(): Geo = Geo(
+        prefs.getInt(P.WIDTH, AutoSize.widthDp(this)).dp,
+        prefs.getInt(P.HEIGHT, AutoSize.heightDp(this)).dp,
+        screenWidth()
+    )
 
     private fun computePosition() {
         val g = geo()
@@ -382,31 +377,11 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         }
     }
 
-    private fun updateCover() {
-        val cv = coverView ?: return
-        val clp = coverLp ?: return
-        val g = geo()
-        clp.height = statusBarHeight()
-        val right = prefs.getBoolean(P.CLOCK_RIGHT, false)
-        val half = g.screenW / 2
-        val ear = when {
-            landscape -> 140.dp
-            right -> half - baseX - g.idleW / 2
-            else -> half + baseX - g.idleW / 2
-        }
-        cv.place(right, ear.coerceAtLeast(56.dp))
-        try { wm.updateViewLayout(cv, clp) } catch (e: Exception) { }
-        applyVisibility()
-    }
-
     private fun applyVisibility() {
         if (!::prefs.isInitialized) return
         val enabled = prefs.getBoolean(P.ENABLED, true)
         val showIsland = enabled && !landscape && !shadeOpen &&
             !(fullscreen && prefs.getBoolean(P.HIDE_FULLSCREEN, true))
-        val showCover = enabled && prefs.getBoolean(P.HIDE_ICONS, true) &&
-            !prefs.getBoolean(P.NATIVE_ICONS, false) && !shadeOpen && !fullscreen
-        coverView?.visibility = if (showCover) View.VISIBLE else View.GONE
         val iv = islandView ?: return
         val p = islandLp ?: return
         if (showIsland != islandShown) {
@@ -431,13 +406,18 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
                     if (w.type != AccessibilityWindowInfo.TYPE_SYSTEM) continue
                     w.getBoundsInScreen(r)
                     if (r.height() <= dm.heightPixels * 0.45f || r.width() <= dm.widthPixels * 0.6f) continue
-                    // Only a big system window that is the shade (by name), or that has focus.
-                    val title = w.title?.toString()?.lowercase() ?: ""
-                    val named = title.contains("notification") || title.contains("shade") ||
-                        title.contains("quick") || title.contains("panel")
-                    if (named || (title.isEmpty() && (w.isFocused || w.isActive))) {
+                    // The shade window is full-screen even when it's only showing a small pop-up
+                    // notification, so check what part of it is actually in use.
+                    var expanded = w.isFocused || w.isActive
+                    if (!expanded && Build.VERSION.SDK_INT >= 33) {
+                        val region = android.graphics.Region()
+                        w.getRegionInScreen(region)
+                        val b = region.bounds
+                        expanded = b.height() > dm.heightPixels * 0.45f && b.width() > dm.widthPixels * 0.6f
+                    }
+                    if (expanded) {
                         open = true
-                        why = title
+                        why = w.title?.toString() ?: ""
                         break
                     }
                 }
@@ -755,6 +735,18 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             if (++probeCheck >= 3) {
                 probeCheck = 0
                 if (islandView != null) updateProbe()
+            }
+            // Re-attach the notification listener if Android dropped it.
+            if (++rebindCheck >= 30) {
+                rebindCheck = 0
+                if (NotifListener.instance == null) {
+                    try {
+                        android.service.notification.NotificationListenerService.requestRebind(
+                            android.content.ComponentName(this@IslandService, NotifListener::class.java)
+                        )
+                    } catch (e: Exception) {
+                    }
+                }
             }
             main.postDelayed(this, 1000L)
         }
