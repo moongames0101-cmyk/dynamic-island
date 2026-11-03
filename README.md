@@ -29,7 +29,7 @@ It updates itself from this GitHub repo, so wherever you are, new versions reach
 | Headphones | Bluetooth devices connecting, with battery % |
 | Custom prompts | Your own messages: show now, pin, or daily at a set time |
 
-**Gestures:** tap to expand · hold to open the app · swipe up to dismiss.
+**Gestures (like iPhone):** tap to open the app · touch and hold to expand · swipe sideways to tuck an activity away · swipe up to dismiss a pop-up. Two activities at once split into the island plus a small circle.
 
 **Status bar:** "Hide status bar icons" covers the top bar in black and shows only the clock.
 "Native mode" instead hides Android's real icons; it needs a one-time command from a computer:

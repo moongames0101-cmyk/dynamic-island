@@ -144,7 +144,7 @@ class MainActivity : Activity() {
 
     private fun build() {
         root.addView(label("Dynamic Island", 34f, Color.WHITE, bold = true))
-        val sub = label("Version ${BuildConfig.VERSION_NAME} · tap the island to expand, hold it to open the app", 14f, C.GRAY, lines = 3)
+        val sub = label("Version ${BuildConfig.VERSION_NAME} · tap the island to open the app, hold it to expand, swipe sideways to tuck it away", 14f, C.GRAY, lines = 3)
         sub.setPadding(0, 8.dp, 0, 0)
         root.addView(sub)
 

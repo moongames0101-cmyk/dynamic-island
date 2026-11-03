@@ -24,6 +24,11 @@ class NotifListener : NotificationListenerService() {
     companion object {
         @Volatile
         var instance: NotifListener? = null
+
+        private val DIALERS = setOf(
+            "com.samsung.android.incallui", "com.samsung.android.dialer", "com.android.incallui",
+            "com.google.android.dialer", "com.android.dialer", "com.android.server.telecom"
+        )
     }
 
     private var media: MediaTracker? = null
@@ -102,7 +107,9 @@ class NotifListener : NotificationListenerService() {
         val prog = ex.getInt(Notification.EXTRA_PROGRESS, 0)
         val indeterminate = ex.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE)
         val callType = ex.getInt("android.callType", 0)
-        val isCall = cat == "call" || template.contains("CallStyle")
+        // Samsung's (and Google's) phone apps don't always tag their in-call notification as a call.
+        val dialer = pkg in DIALERS
+        val isCall = cat == "call" || template.contains("CallStyle") || (dialer && ongoing)
         val incoming = isCall && (callType == 1 || (!showChrono && n.fullScreenIntent != null))
 
         var kind: LiveKind? = when {
@@ -218,6 +225,8 @@ class NotifListener : NotificationListenerService() {
                 title = title.ifEmpty { appName },
                 text = body,
                 icon = largeIcon ?: appIcon,
+                badge = if (largeIcon != null) appIcon else null,
+                iconRound = largeIcon != null,
                 appName = appName,
                 duration = svc.toastMs(),
                 onTap = {

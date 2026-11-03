@@ -13,6 +13,7 @@ class Feature(val key: String, val label: String, val desc: String)
 object P {
     const val ENABLED = "enabled"
     const val NATIVE_ICONS = "native_icons"
+    const val NATIVE_APPLIED = "native_applied"
     const val SAVED_BLACKLIST = "saved_blacklist"
     const val WIDTH = "island_w"
     const val HEIGHT = "island_h"
@@ -119,10 +120,34 @@ object Prompts {
 /** "Native mode": hides the real status bar icons (needs a one-time ADB grant). */
 object StatusIcons {
     private const val KEY = "icon_blacklist"
-    private const val SLOTS = "rotate,headset,alarm_clock,battery,bluetooth,cast,data_saver,dnd,zen," +
-        "hotspot,location,managed_profile,mobile,nfc,speakerphone,volume,vpn,wifi,ethernet,airplane," +
-        "call_strength,ims,wifi_calling,sensors_off,mic,camera,screen_record,connected_display,tty," +
-        "cast,power_save,network_speed"
+
+    // Known slot names (AOSP + Samsung's call / Wi-Fi Calling / VoLTE icons). Unknown names are harmless.
+    private val EXTRA = listOf(
+        "rotate", "headset", "alarm_clock", "battery", "bluetooth", "cast", "data_saver", "dnd", "zen",
+        "hotspot", "location", "managed_profile", "mobile", "nfc", "speakerphone", "volume", "vpn", "wifi",
+        "ethernet", "airplane", "call_strength", "ims", "wifi_calling", "sensors_off", "mic", "camera",
+        "screen_record", "connected_display", "tty", "power_save", "network_speed", "mute", "phone",
+        "volte", "vowifi", "volte1", "volte2", "vowifi1", "vowifi2", "ims_volte", "ims_vowifi", "hd_voice",
+        "wifi_call", "voice_call", "call_record", "call_forward", "call_forwarding", "cdma_eri", "tty_mode",
+        "smart_bonding", "wifi_p2p", "dual_sim", "sim_card", "data_connection", "nr", "ims_registration",
+        "knox_container", "secure_folder", "dex", "glove", "power_saving", "sync_active", "sync_failing",
+        "alarm", "missed_call", "battery_saver", "privacy_indicator", "dnd_mode"
+    )
+
+    /** Every status bar icon slot the phone knows about, except the clock. */
+    @android.annotation.SuppressLint("DiscouragedApi")
+    private fun slots(): String {
+        val all = LinkedHashSet<String>()
+        try {
+            val res = android.content.res.Resources.getSystem()
+            val id = res.getIdentifier("config_statusBarIcons", "array", "android")
+            if (id != 0) res.getStringArray(id).forEach { if (it.isNotBlank()) all.add(it.trim()) }
+        } catch (e: Exception) {
+        }
+        all.addAll(EXTRA)
+        all.remove("clock")
+        return all.joinToString(",")
+    }
 
     fun canWrite(ctx: Context): Boolean =
         ctx.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
@@ -133,12 +158,18 @@ object StatusIcons {
         try {
             val cr = ctx.contentResolver
             if (on) {
+                val slots = slots()
                 val current = Settings.Secure.getString(cr, KEY)
-                if (current != SLOTS) p.edit().putString(P.SAVED_BLACKLIST, current ?: "").apply()
-                Settings.Secure.putString(cr, KEY, SLOTS)
+                if (!p.getBoolean(P.NATIVE_APPLIED, false)) {
+                    // Remember the phone's original list (ignore a list written by an older version of this app).
+                    val original = if (current != null && current.contains("connected_display")) "" else current ?: ""
+                    p.edit().putString(P.SAVED_BLACKLIST, original).putBoolean(P.NATIVE_APPLIED, true).apply()
+                }
+                Settings.Secure.putString(cr, KEY, slots)
             } else {
                 val saved = p.getString(P.SAVED_BLACKLIST, "") ?: ""
                 Settings.Secure.putString(cr, KEY, saved.ifEmpty { null })
+                p.edit().putBoolean(P.NATIVE_APPLIED, false).apply()
             }
         } catch (e: Exception) {
         }

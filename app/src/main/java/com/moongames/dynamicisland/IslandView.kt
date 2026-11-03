@@ -21,6 +21,7 @@ import android.view.ViewOutlineProvider
 import android.view.animation.LinearInterpolator
 import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
+import android.widget.ImageView
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
@@ -58,6 +59,16 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
     private var curR = 0f
     private var anim: ValueAnimator? = null
     private var content: View? = null
+    private var targetW = 0
+    private var targetH = 0
+    private var offsetX = 0
+
+    // Second activity, iPhone-style: a small black circle beside the island.
+    private val bubble = FrameLayout(ctx)
+    private val bubbleImg = ImageView(ctx)
+    private var bubbleKey: String? = null
+    private var bubbleSize = 0
+    private val bubbleGap = 6.dp
     // Well-damped springs: smooth and settled, with almost no wobble.
     private val springSize = Spring(0.9f)
     private val springSoft = Spring(0.95f)
@@ -81,6 +92,10 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
                 svc.onIslandSwipeUp()
                 return true
             }
+            if (abs(velocityX) > 500f && abs(velocityX) > abs(velocityY)) {
+                svc.onIslandSwipeSide()
+                return true
+            }
             return false
         }
     })
@@ -97,6 +112,24 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
         }
         pill.clipToOutline = true
         addView(pill, flp(0, 0, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
+
+        bubble.background = GradientDrawable().apply { setColor(Color.BLACK); cornerRadius = 999f }
+        bubble.outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: Outline) {
+                outline.setOval(0, 0, view.width, view.height)
+            }
+        }
+        bubble.clipToOutline = true
+        bubbleImg.scaleType = ImageView.ScaleType.CENTER_CROP
+        bubble.addView(bubbleImg, flp(MATCH, MATCH))
+        bubble.visibility = View.GONE
+        bubble.setOnClickListener { svc.onBubbleTap() }
+        bubble.setOnLongClickListener {
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            svc.onBubbleHold()
+            true
+        }
+        addView(bubble, flp(0, 0, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
 
         setOnTouchListener { _, ev ->
             when (ev.actionMasked) {
@@ -133,6 +166,8 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
         val sw = curW
         val sh = curH
         val sr = curR
+        targetW = w
+        targetH = h
         // Only the invisible touch area changes size; the visible window stays put.
         svc.resizeIsland(w, h)
 
@@ -231,11 +266,61 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
         bg.cornerRadius = curR
         pill.visibility = if (curW <= 2 || curH <= 2) View.INVISIBLE else View.VISIBLE
         pill.invalidateOutline()
+        placeBubble()
+    }
+
+    private fun placeBubble() {
+        bubble.translationX = offsetX + curW / 2f + bubbleGap + bubbleSize / 2f
+    }
+
+    /** Shows [item] as the little circle to the right of the island, or hides it (null). */
+    fun setBubble(item: LiveItem?, size: Int) {
+        val key = item?.let { it.key + ":" + it.kind }
+        if (key == bubbleKey && (item == null || bubbleSize == size)) {
+            if (item != null) fillBubble(item)
+            return
+        }
+        bubbleKey = key
+        if (item == null) {
+            svc.resizeIsland(targetW, targetH, 0)
+            if (bubble.visibility == View.VISIBLE) {
+                bubble.animate().scaleX(0.3f).scaleY(0.3f).alpha(0f).setStartDelay(0).setDuration(180)
+                    .setInterpolator(easeOut).withEndAction { bubble.visibility = View.GONE }.start()
+            }
+            return
+        }
+        bubbleSize = size
+        val p = bubble.layoutParams as FrameLayout.LayoutParams
+        p.width = size
+        p.height = size
+        bubble.layoutParams = p
+        fillBubble(item)
+        placeBubble()
+        svc.resizeIsland(targetW, targetH, bubbleGap + size)
+        bubble.visibility = View.VISIBLE
+        bubble.alpha = 0f
+        bubble.scaleX = 0.3f
+        bubble.scaleY = 0.3f
+        bubble.animate().scaleX(1f).scaleY(1f).alpha(1f).setStartDelay(120).setDuration(380)
+            .setInterpolator(springSize).start()
+    }
+
+    private fun fillBubble(item: LiveItem) {
+        if (item.kind == LiveKind.MEDIA && item.icon != null) {
+            bubbleImg.setPadding(0, 0, 0, 0)
+            bubbleImg.setImageDrawable(item.icon)
+        } else {
+            val pad = (bubbleSize * 0.24f).toInt()
+            bubbleImg.setPadding(pad, pad, pad, pad)
+            bubbleImg.setImageDrawable(Panels.kindIcon(context, item.kind))
+        }
     }
 
     /** Moves the island sideways to sit over the camera. */
     fun setOffsetX(x: Int) {
+        offsetX = x
         pill.translationX = x.toFloat()
+        placeBubble()
     }
 
     /** Touches arrive from the invisible touch window; replay them on this view. */

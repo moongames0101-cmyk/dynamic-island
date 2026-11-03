@@ -61,6 +61,7 @@ object Panels {
     fun expanded(svc: IslandService, item: LiveItem, g: Geo): Panel = when {
         item.kind == LiveKind.MEDIA && item.media != null -> MediaPanel(svc, item, g)
         item.kind == LiveKind.PROMPT -> PromptPanel(svc, item, g)
+        item.kind == LiveKind.CALL -> CallPanel(svc, item, g)
         else -> GenericPanel(svc, item, g)
     }
 
@@ -383,9 +384,10 @@ private class GenericPanel(private val svc: IslandService, private val item: Liv
             val row = svc.hbox()
             row.setPadding(0, 14.dp, 0, 0)
             item.actions.forEachIndexed { i, a ->
-                val b = svc.label(a.title, 14f, Color.WHITE, bold = true)
+                val timer = item.kind == LiveKind.TIMER
+                val b = svc.label(a.title, 14f, if (timer) C.ORANGE else Color.WHITE, bold = true)
                 b.gravity = Gravity.CENTER
-                b.background = roundRect(Panels.actionColor(a.title.toString()), 21f.dpf)
+                b.background = roundRect(if (timer) 0x40FF9F0A else Panels.actionColor(a.title.toString()), 21f.dpf)
                 b.setOnClickListener {
                     svc.touched()
                     svc.sendPending(a.intent)
@@ -462,48 +464,60 @@ private class PromptPanel(private val svc: IslandService, private val item: Live
     }
 }
 
-/** Notification-style pop-out: icon, app name, title, message. */
+/** Notification pop-out, iOS-style: app icon (or contact photo + app badge), title, "now", message. */
 private class CardToastPanel(svc: IslandService, t: ToastItem, g: Geo) : Panel(svc) {
     private val root = FrameLayout(svc)
     override val view: View get() = root
 
     init {
         width = g.cardW
-        height = if (t.text.isBlank()) 76.dp else 90.dp
+        height = if (t.text.isBlank()) 76.dp else 92.dp
         radius = min(height / 2f, 42f.dpf)
 
         val row = svc.hbox()
         row.setPadding(16.dp, 0, 20.dp, 0)
+
+        val iconBox = FrameLayout(svc)
         if (t.icon != null) {
             val iv = ImageView(svc)
             iv.setImageDrawable(t.icon)
             iv.scaleType = ImageView.ScaleType.CENTER_CROP
-            iv.roundCorners(24f.dpf)
-            row.addView(iv, llp(48.dp, 48.dp))
+            iv.roundCorners(if (t.iconRound) 22f.dpf else 11f.dpf)
+            iconBox.addView(iv, flp(44.dp, 44.dp, Gravity.TOP or Gravity.START))
         } else {
             val e = svc.label(t.emoji.ifEmpty { "✨" }, 28f, Color.WHITE)
             e.gravity = Gravity.CENTER
-            row.addView(e, llp(48.dp, 48.dp))
+            iconBox.addView(e, flp(44.dp, 44.dp, Gravity.TOP or Gravity.START))
         }
+        if (t.badge != null) {
+            val b = ImageView(svc)
+            b.setImageDrawable(t.badge)
+            b.scaleType = ImageView.ScaleType.CENTER_CROP
+            b.roundCorners(5f.dpf)
+            iconBox.addView(b, flp(19.dp, 19.dp, Gravity.BOTTOM or Gravity.END))
+        }
+        row.addView(iconBox, llp(50.dp, 50.dp))
+
         val col = svc.vbox()
-        col.setPadding(13.dp, 0, 0, 0)
-        if (t.appName.isNotEmpty()) {
-            col.addView(svc.label(t.appName, 12f, C.GRAY))
-        }
+        col.setPadding(10.dp, 0, 0, 0)
+        val head = svc.hbox()
         val title = svc.label(t.title, 15.5f, Color.WHITE, bold = true, lines = if (t.text.isBlank()) 2 else 1)
-        title.setPadding(0, 2.dp, 0, 0)
-        col.addView(title)
+        head.addView(title, llp(0, WRAP, 1f))
+        head.addView(svc.label("now", 12.5f, C.GRAY), llp(WRAP, WRAP).apply { marginStart = 8.dp })
+        col.addView(head, llp(MATCH, WRAP))
         if (t.text.isNotBlank()) {
-            val body = svc.label(t.text, 13.5f, C.LIGHT, lines = 2)
-            body.setPadding(0, 2.dp, 0, 0)
+            val body = svc.label(t.text, 14f, C.LIGHT, lines = 2)
+            body.setPadding(0, 3.dp, 0, 0)
             col.addView(body)
+        } else if (t.appName.isNotEmpty()) {
+            col.addView(svc.label(t.appName, 13f, C.GRAY).apply { setPadding(0, 3.dp, 0, 0) })
         }
         row.addView(col, llp(0, WRAP, 1f))
         root.addView(row, flp(MATCH, MATCH))
     }
 }
 
-/** Wide pill: label on the left of the camera, value on the right (Charging 82% ▮). */
+/** Wide pill around the camera: something on the left, a value on the right (Charging … 82% ▮). */
 private class BannerPanel(svc: IslandService, t: ToastItem, g: Geo) : Panel(svc) {
     private val root = FrameLayout(svc)
     override val view: View get() = root
@@ -517,15 +531,25 @@ private class BannerPanel(svc: IslandService, t: ToastItem, g: Geo) : Panel(svc)
         if (t.icon != null) {
             val iv = ImageView(svc)
             iv.setImageDrawable(t.icon)
-            left.addView(iv, llp(20.dp, 20.dp))
+            if (t.iconBg != 0) {
+                // iOS Silent-mode style: white glyph on a coloured capsule.
+                val cap = FrameLayout(svc)
+                cap.background = roundRect(t.iconBg, 50f.dpf)
+                cap.addView(iv, flp(16.dp, 16.dp, Gravity.CENTER))
+                left.addView(cap, llp(34.dp, (height - 10.dp).coerceIn(18.dp, 24.dp)))
+            } else {
+                left.addView(iv, llp(20.dp, 20.dp))
+            }
         } else if (t.emoji.isNotEmpty()) {
             left.addView(svc.label(t.emoji, 15f, Color.WHITE), llp(WRAP, WRAP))
         }
-        val title = svc.label(t.title, 14.5f, Color.WHITE, bold = true)
-        title.maxWidth = (width / 2 - 40.dp).coerceAtLeast(40.dp)
-        title.setPadding(if (left.childCount > 0) 8.dp else 0, 0, 0, 0)
-        left.addView(title, llp(WRAP, WRAP))
-        root.addView(left, flp(WRAP, WRAP, Gravity.START or Gravity.CENTER_VERTICAL).apply { marginStart = 16.dp })
+        if (t.title.isNotEmpty()) {
+            val title = svc.label(t.title, 14.5f, Color.WHITE, bold = true)
+            title.maxWidth = (width / 2 - 40.dp).coerceAtLeast(40.dp)
+            title.setPadding(if (left.childCount > 0) 8.dp else 0, 0, 0, 0)
+            left.addView(title, llp(WRAP, WRAP))
+        }
+        root.addView(left, flp(WRAP, WRAP, Gravity.START or Gravity.CENTER_VERTICAL).apply { marginStart = 14.dp })
 
         val right = svc.hbox()
         if (t.value.isNotEmpty()) {
@@ -537,6 +561,76 @@ private class BannerPanel(svc: IslandService, t: ToastItem, g: Geo) : Panel(svc)
             right.addView(b, llp(27.dp, 13.dp).apply { marginStart = 7.dp })
         }
         root.addView(right, flp(WRAP, WRAP, Gravity.END or Gravity.CENTER_VERTICAL).apply { marginEnd = 16.dp })
+    }
+}
+
+/** Calls, iPhone-style: photo and name, with round red/green buttons. */
+private class CallPanel(private val svc: IslandService, private val item: LiveItem, g: Geo) : Panel(svc) {
+    private val root = FrameLayout(svc)
+    override val view: View get() = root
+    private val sub = svc.label("", 13.5f, C.GRAY)
+
+    init {
+        width = g.cardW
+        height = 88.dp
+        radius = height / 2f
+
+        val row = svc.hbox()
+        row.setPadding(14.dp, 0, 14.dp, 0)
+        val photo = ImageView(svc)
+        photo.scaleType = ImageView.ScaleType.CENTER_CROP
+        photo.roundCorners(25f.dpf)
+        photo.setImageDrawable(item.icon ?: Panels.kindIcon(svc, LiveKind.CALL))
+        row.addView(photo, llp(50.dp, 50.dp))
+
+        val col = svc.vbox()
+        col.setPadding(12.dp, 0, 8.dp, 0)
+        col.addView(svc.label(item.title.ifEmpty { "Call" }, 17f, Color.WHITE, bold = true))
+        sub.setPadding(0, 3.dp, 0, 0)
+        sub.fontFeatureSettings = "tnum"
+        col.addView(sub)
+        row.addView(col, llp(0, WRAP, 1f))
+
+        val decline = item.actions.firstOrNull { Panels.actionColor(it.title.toString()) == C.RED }
+        val accept = item.actions.firstOrNull { Panels.actionColor(it.title.toString()) == C.GREEN }
+        if (item.incoming) {
+            round(row, decline ?: item.actions.getOrNull(0), C.RED, R.drawable.ic_call_end, true)
+            round(row, accept ?: item.actions.getOrNull(1), C.GREEN, R.drawable.ic_call, false)
+        } else {
+            round(row, decline ?: item.actions.lastOrNull(), C.RED, R.drawable.ic_call_end, true)
+        }
+        root.addView(row, flp(MATCH, MATCH))
+        tick()
+    }
+
+    private fun round(row: LinearLayout, action: NotifAction?, color: Int, icon: Int, end: Boolean) {
+        if (action == null) return
+        val b = FrameLayout(svc)
+        b.background = roundRect(color, 50f.dpf)
+        val iv = ImageView(svc)
+        iv.setImageResource(icon)
+        b.addView(iv, flp(24.dp, 24.dp, Gravity.CENTER))
+        b.setOnClickListener {
+            svc.touched()
+            svc.sendPending(action.intent)
+            if (end) svc.collapse()
+        }
+        row.addView(b, llp(52.dp, 52.dp).apply { marginStart = 10.dp })
+    }
+
+    override fun tick() {
+        if (item.incoming) {
+            sub.setTextColor(C.GRAY)
+            sub.text = item.text.ifEmpty { "Incoming call" }.let { if (item.appName.isNotEmpty()) "$it · ${item.appName}" else it }
+        } else {
+            sub.setTextColor(C.GREEN)
+            sub.text = if (item.hasChrono) item.chronoText() else item.text.ifEmpty { "On call" }
+        }
+    }
+
+    override fun refresh(): Boolean {
+        tick()
+        return false
     }
 }
 

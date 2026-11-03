@@ -81,7 +81,13 @@ class ToastItem(
     val charging: Boolean = false,
     val duration: Long = 3500L,
     val appName: String = "",
-    val onTap: (() -> Unit)? = null
+    val onTap: (() -> Unit)? = null,
+    /** Small app icon shown on the corner of a contact photo (iOS-style). */
+    val badge: Drawable? = null,
+    /** Round (contact photo) vs rounded-square (app icon). */
+    val iconRound: Boolean = false,
+    /** Coloured capsule behind the icon, like iOS's red Silent bell. 0 = none. */
+    val iconBg: Int = 0
 ) {
     val id: Int = nextId++
 

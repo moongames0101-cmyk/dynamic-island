@@ -72,6 +72,10 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     private var lastError: String? = null
     private var probeCheck = 0
     private var rebindCheck = 25
+    private var touchW = 1
+    private var touchH = 1
+    private var touchExtra = 0
+    private val snoozed = HashSet<String>()
     private var landscape = false
     private var islandShown = true
     private var mediaPausedAt = 0L
@@ -113,6 +117,8 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         registerReceivers()
         registerTorch()
         syncPinned()
+        // Re-apply "Hide system icons" so new versions pick up an updated icon list.
+        if (prefs.getBoolean(P.NATIVE_ICONS, false)) StatusIcons.apply(this, true)
         main.post(ticker)
         main.postDelayed(updateCheck, 30_000L)
         render(true)
@@ -238,7 +244,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         //    taps and swipes on to it. Everywhere else, touches go to your apps as normal.
         val tv = TouchCatcher()
         val tlp = overlayParams(1, 1, true)
-        tlp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        tlp.gravity = Gravity.TOP or Gravity.START
         touchLp = tlp
         touchView = tv
 
@@ -345,14 +351,27 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         try { wm.updateViewLayout(v, p) } catch (e: Exception) { }
     }
 
-    /** Resizes only the invisible touch area; the visible island window never changes size. */
-    fun resizeIsland(w: Int, h: Int) {
+    /**
+     * Resizes only the invisible touch area (the island, plus the little side bubble if shown);
+     * the visible island window never changes size.
+     */
+    fun resizeIsland(w: Int, h: Int, extraRight: Int = touchExtra) {
+        touchW = max(w, 1)
+        touchH = max(h, 1)
+        touchExtra = max(extraRight, 0)
+        applyTouchArea()
+    }
+
+    private fun applyTouchArea() {
         val p = touchLp ?: return
-        val nw = max(w, 1)
-        val nh = max(h, 1)
-        if (p.width == nw && p.height == nh) return
+        val nw = touchW + touchExtra
+        val nx = screenWidth() / 2 + baseX - touchW / 2
+        val ny = baseY.coerceAtLeast(0)
+        if (p.width == nw && p.height == touchH && p.x == nx && p.y == ny) return
         p.width = nw
-        p.height = nh
+        p.height = touchH
+        p.x = nx
+        p.y = ny
         pushTouchLayout()
     }
 
@@ -413,11 +432,8 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             it.x = 0
             it.y = baseY.coerceAtLeast(0)
         }
-        touchLp?.let {
-            it.x = baseX
-            it.y = baseY.coerceAtLeast(0)
-        }
         islandView?.setOffsetX(baseX)
+        applyTouchArea()
     }
 
     private fun applyVisibility() {
@@ -515,11 +531,24 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         } else if (p.refresh()) {
             iv.morph(p.width, p.height, p.radius, p.view)
         }
+        // iPhone-style split: a second activity shows as a small circle beside the island.
+        val second = if (t == null && exp == null && top != null) secondLive(top.key) else null
+        iv.setBubble(second, g.idleH)
     }
 
     private fun topLive(): LiveItem? {
         var best: LiveItem? = null
         for (item in lives.values) {
+            if (item.key in snoozed) continue
+            if (best == null || item.kind.priority >= best.kind.priority) best = item
+        }
+        return best
+    }
+
+    private fun secondLive(exclude: String? = topLive()?.key): LiveItem? {
+        var best: LiveItem? = null
+        for (item in lives.values) {
+            if (item.key == exclude || item.key in snoozed) continue
             if (best == null || item.kind.priority >= best.kind.priority) best = item
         }
         return best
@@ -542,27 +571,70 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             openItem(exp)
             return
         }
+        // Like iPhone: tap opens the app behind the activity.
         val top = topLive()
         if (top != null) {
-            expandedKey = top.key
-            render()
+            if (top.kind == LiveKind.PROMPT) {
+                expandedKey = top.key
+                render()
+            } else {
+                openItem(top)
+            }
             return
         }
         islandView?.bounce()
     }
 
+    /** Like iPhone: touch and hold expands the activity. */
     fun onIslandLongPress() {
+        if (toast != null) return
         val top = topLive()
-        if (top != null && toast == null) {
-            collapse()
-            openItem(top)
-        } else if (top == null && toast == null) {
-            openSettings()
+        if (top == null) {
+            islandView?.bounce()
+            return
+        }
+        if (expandedKey == null) {
+            expandedKey = top.key
+            touched()
+            render()
         }
     }
 
     fun onIslandSwipeUp() {
         if (toast != null) nextToast() else collapse()
+    }
+
+    /** Swipe sideways to tuck the current activity away (it comes back when it changes). */
+    fun onIslandSwipeSide() {
+        if (toast != null) {
+            nextToast()
+            return
+        }
+        if (expandedKey != null) {
+            collapse()
+            return
+        }
+        val top = topLive() ?: return
+        snoozed.add(top.key)
+        render()
+    }
+
+    fun onBubbleTap() {
+        touched()
+        val s = secondLive() ?: return
+        if (s.kind == LiveKind.PROMPT) {
+            expandedKey = s.key
+            render()
+        } else {
+            openItem(s)
+        }
+    }
+
+    fun onBubbleHold() {
+        val s = secondLive() ?: return
+        expandedKey = s.key
+        touched()
+        render()
     }
 
     fun onOutsideTouch() {
@@ -701,7 +773,10 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         val item = existing ?: LiveItem(key, kind)
         item.kind = kind
         fill(item)
-        if (existing == null) lives[key] = item
+        if (existing == null) {
+            lives[key] = item
+            snoozed.remove(key)
+        }
         if (autoExpand && existing == null) {
             expandedKey = key
             touched()
@@ -710,6 +785,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     }
 
     fun removeLive(key: String) {
+        snoozed.remove(key)
         if (lives.remove(key) != null) {
             if (expandedKey == key) expandedKey = null
             render()
@@ -879,7 +955,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         showToast(
             ToastItem(
                 ToastStyle.BANNER, title = "Charging", value = "$lvl%",
-                icon = tinted(R.drawable.ic_bolt, C.GREEN), accent = C.GREEN,
+                accent = C.GREEN,
                 battery = lvl, charging = true, duration = 3200L
             )
         )
@@ -924,16 +1000,19 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     private fun ringerToast(mode: Int) {
         val t = when (mode) {
             AudioManager.RINGER_MODE_SILENT -> ToastItem(
-                ToastStyle.BANNER, title = "Silent", value = "On",
-                icon = tinted(R.drawable.ic_bell_off, C.RED), accent = C.RED, duration = 2400L
+                ToastStyle.BANNER, title = "", value = "Silent",
+                icon = tinted(R.drawable.ic_bell_off, android.graphics.Color.WHITE), iconBg = C.RED,
+                accent = C.RED, duration = 2400L
             )
             AudioManager.RINGER_MODE_VIBRATE -> ToastItem(
-                ToastStyle.BANNER, title = "Vibrate", value = "On",
-                icon = tinted(R.drawable.ic_vibrate, C.ORANGE), accent = C.ORANGE, duration = 2400L
+                ToastStyle.BANNER, title = "", value = "Vibrate",
+                icon = tinted(R.drawable.ic_vibrate, android.graphics.Color.WHITE), iconBg = C.ORANGE,
+                accent = C.ORANGE, duration = 2400L
             )
             else -> ToastItem(
-                ToastStyle.BANNER, title = "Ring", value = "On",
-                icon = tinted(R.drawable.ic_bell, android.graphics.Color.WHITE), duration = 2400L
+                ToastStyle.BANNER, title = "", value = "Ring",
+                icon = tinted(R.drawable.ic_bell, android.graphics.Color.WHITE), iconBg = C.CARD2,
+                duration = 2400L
             )
         }
         showToast(t)
