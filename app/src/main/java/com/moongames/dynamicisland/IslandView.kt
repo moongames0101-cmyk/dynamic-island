@@ -21,7 +21,6 @@ import android.view.ViewOutlineProvider
 import android.view.animation.LinearInterpolator
 import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
-import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
@@ -59,8 +58,9 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
     private var curR = 0f
     private var anim: ValueAnimator? = null
     private var content: View? = null
-    private val springSize = Spring(0.68f)
-    private val springSoft = Spring(0.85f)
+    // Well-damped springs: smooth and settled, with almost no wobble.
+    private val springSize = Spring(0.9f)
+    private val springSoft = Spring(0.95f)
     private val easeOut = PathInterpolator(0.2f, 0f, 0f, 1f)
 
     private val detector = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
@@ -106,12 +106,12 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
                 }
                 MotionEvent.ACTION_DOWN -> {
                     pill.pivotX = pill.width / 2f
-                    pill.animate().scaleX(0.95f).scaleY(0.95f).setStartDelay(0).setDuration(120)
+                    pill.animate().scaleX(0.97f).scaleY(0.97f).setStartDelay(0).setDuration(120)
                         .setInterpolator(easeOut).start()
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    pill.animate().scaleX(1f).scaleY(1f).setStartDelay(0).setDuration(420)
-                        .setInterpolator(springSize).start()
+                    pill.animate().scaleX(1f).scaleY(1f).setStartDelay(0).setDuration(260)
+                        .setInterpolator(easeOut).start()
                 }
             }
             detector.onTouchEvent(ev)
@@ -120,10 +120,10 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
 
     fun bounce() {
         pill.pivotX = pill.width / 2f
-        pill.animate().scaleX(1.1f).scaleY(1.06f).setStartDelay(0).setDuration(120)
+        pill.animate().scaleX(1.04f).scaleY(1.04f).setStartDelay(0).setDuration(110)
             .setInterpolator(easeOut).withEndAction {
-                pill.animate().scaleX(1f).scaleY(1f).setStartDelay(0).setDuration(500)
-                    .setInterpolator(Spring(0.45f)).start()
+                pill.animate().scaleX(1f).scaleY(1f).setStartDelay(0).setDuration(300)
+                    .setInterpolator(easeOut).start()
             }.start()
     }
 
@@ -133,7 +133,8 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
         val sw = curW
         val sh = curH
         val sr = curR
-        val growing = w * h >= sw * sh
+        // Only the invisible touch area changes size; the visible window stays put.
+        svc.resizeIsland(w, h)
 
         val old = content
         if (newContent !== old) {
@@ -150,31 +151,18 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
 
         if (sw == w && sh == h && sr == r) {
             applySize(w, h, r)
-            svc.resizeIsland(max(w, 1), max(h, 1))
             return
         }
 
-        // Window gets headroom for the overshoot; the pill animates inside it.
-        svc.resizeIsland((max(sw, w) * 1.08f).toInt() + 8, (max(sh, h) * 1.12f).toInt() + 8)
-
-        // Like iOS: when growing, the width leads and the height follows a beat later;
-        // when shrinking, the height tucks in first.
-        val total = 620L
-        val lag = 70f / total
         val a = ValueAnimator.ofFloat(0f, 1f)
-        a.duration = total
+        a.duration = 460L
         a.interpolator = LinearInterpolator()
         a.addUpdateListener {
-            val t = it.animatedValue as Float
-            val tLead = (t / (1f - lag)).coerceAtMost(1f)
-            val tLag = ((t - lag) / (1f - lag)).coerceIn(0f, 1f)
-            val fw = springSize.getInterpolation(if (growing) tLead else tLag)
-            val fh = springSize.getInterpolation(if (growing) tLag else tLead)
-            val fr = springSoft.getInterpolation(tLead)
+            val f = springSize.getInterpolation(it.animatedValue as Float)
             applySize(
-                (sw + (w - sw) * fw).toInt(),
-                (sh + (h - sh) * fh).toInt(),
-                sr + (r - sr) * fr.coerceIn(0f, 1f)
+                (sw + (w - sw) * f).toInt(),
+                (sh + (h - sh) * f).toInt(),
+                sr + (r - sr) * f.coerceIn(0f, 1f)
             )
         }
         a.addListener(object : AnimatorListenerAdapter() {
@@ -186,7 +174,6 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
             override fun onAnimationEnd(animation: Animator) {
                 if (cancelled) return
                 applySize(w, h, r)
-                svc.resizeIsland(max(w, 1), max(h, 1))
             }
         })
         anim = a
@@ -195,18 +182,18 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
 
     private fun contentIn(v: View, delay: Long) {
         v.alpha = 0f
-        v.scaleX = 0.88f
-        v.scaleY = 0.88f
-        v.animate().alpha(1f).scaleX(1f).scaleY(1f).setStartDelay(delay).setDuration(380)
-            .setInterpolator(springSoft).start()
-        blur(v, 18f, 0f, delay, 300L, null)
+        v.scaleX = 0.95f
+        v.scaleY = 0.95f
+        v.animate().alpha(1f).scaleX(1f).scaleY(1f).setStartDelay(delay).setDuration(300)
+            .setInterpolator(easeOut).start()
+        blur(v, 12f, 0f, delay, 260L, null)
     }
 
     private fun contentOut(v: View) {
         v.animate().cancel()
-        v.animate().alpha(0f).scaleX(0.9f).scaleY(0.9f).setStartDelay(0).setDuration(150)
+        v.animate().alpha(0f).scaleX(0.96f).scaleY(0.96f).setStartDelay(0).setDuration(140)
             .setInterpolator(easeOut).withEndAction { pill.removeView(v) }.start()
-        blur(v, 0f, 18f, 0L, 150L, null)
+        blur(v, 0f, 12f, 0L, 140L, null)
     }
 
     /** Gaussian blur on Android 12+; plain fade on older phones. */
@@ -246,6 +233,18 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
         pill.invalidateOutline()
     }
 
-    @Suppress("unused")
-    private val twoPi = (2 * PI).toFloat()
+    /** Moves the island sideways to sit over the camera. */
+    fun setOffsetX(x: Int) {
+        pill.translationX = x.toFloat()
+    }
+
+    /** Touches arrive from the invisible touch window; replay them on this view. */
+    fun forwardTouch(ev: MotionEvent) {
+        val loc = IntArray(2)
+        getLocationOnScreen(loc)
+        val copy = MotionEvent.obtain(ev)
+        copy.setLocation(ev.rawX - loc[0], ev.rawY - loc[1])
+        dispatchTouchEvent(copy)
+        copy.recycle()
+    }
 }

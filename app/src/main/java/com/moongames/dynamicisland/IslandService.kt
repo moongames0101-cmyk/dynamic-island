@@ -28,6 +28,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.view.Display
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
@@ -54,6 +55,8 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     private var islandView: IslandView? = null
     private var islandLp: WindowManager.LayoutParams? = null
+    private var touchView: View? = null
+    private var touchLp: WindowManager.LayoutParams? = null
     private var probeView: View? = null
 
     val lives = LinkedHashMap<String, LiveItem>()
@@ -151,10 +154,11 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             try { (getSystemService(CAMERA_SERVICE) as CameraManager).unregisterTorchCallback(cb) } catch (e: Exception) { }
         }
         torchCallback = null
-        for (v in listOf<View?>(islandView, probeView)) {
+        for (v in listOf<View?>(islandView, touchView, probeView)) {
             if (v != null) try { wm.removeViewImmediate(v) } catch (e: Exception) { }
         }
         islandView = null
+        touchView = null
         probeView = null
         panel = null
         stateId = ""
@@ -222,18 +226,41 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     @Suppress("DEPRECATION")
     private fun addWindows() {
-        // 1. The island itself.
+        // 1. What you see: a fixed strip across the top that never moves or resizes, so the
+        //    island can't jump around while it animates. It lets every touch through.
         val iv = IslandView(this, this)
-        val ilp = overlayParams(1, 1, true)
-        ilp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        val ilp = overlayParams(WindowManager.LayoutParams.MATCH_PARENT, 250.dp, false)
+        ilp.gravity = Gravity.TOP or Gravity.START
         islandLp = ilp
         islandView = iv
+
+        // 2. What you touch: an invisible window sitting exactly over the island that passes
+        //    taps and swipes on to it. Everywhere else, touches go to your apps as normal.
+        val tv = TouchCatcher()
+        val tlp = overlayParams(1, 1, true)
+        tlp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        touchLp = tlp
+        touchView = tv
+
         computePosition()
         wm.addView(iv, ilp)
+        wm.addView(tv, tlp)
         applyVisibility()
 
-        // 2. Full-screen detector (optional).
+        // 3. Full-screen detector (optional).
         updateProbe()
+    }
+
+    @android.annotation.SuppressLint("ViewConstructor", "ClickableViewAccessibility")
+    private inner class TouchCatcher : View(this@IslandService) {
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            if (event.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+                onOutsideTouch()
+                return false
+            }
+            islandView?.forwardTouch(event)
+            return true
+        }
     }
 
     /**
@@ -282,6 +309,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
                 }
             }
             plp.gravity = Gravity.TOP or Gravity.START
+            plp.alpha = 0f
             wm.addView(pv, plp)
             probeView = pv
         } catch (e: Exception) {
@@ -305,17 +333,27 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     }
 
     private fun pushIslandLayout() {
-        val v = islandView ?: return
-        val p = islandLp ?: return
+        val v = islandView
+        val p = islandLp
+        if (v != null && p != null) try { wm.updateViewLayout(v, p) } catch (e: Exception) { }
+        pushTouchLayout()
+    }
+
+    private fun pushTouchLayout() {
+        val v = touchView ?: return
+        val p = touchLp ?: return
         try { wm.updateViewLayout(v, p) } catch (e: Exception) { }
     }
 
+    /** Resizes only the invisible touch area; the visible island window never changes size. */
     fun resizeIsland(w: Int, h: Int) {
-        val p = islandLp ?: return
-        if (p.width == w && p.height == h) return
-        p.width = w
-        p.height = h
-        pushIslandLayout()
+        val p = touchLp ?: return
+        val nw = max(w, 1)
+        val nh = max(h, 1)
+        if (p.width == nw && p.height == nh) return
+        p.width = nw
+        p.height = nh
+        pushTouchLayout()
     }
 
     private fun setFullscreen(fs: Boolean) {
@@ -372,9 +410,14 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         baseY = (centerY - g.idleH / 2).coerceAtLeast(2.dp) + prefs.getInt(P.OFF_Y, 0).dp
         baseX = centerX + prefs.getInt(P.OFF_X, 0).dp
         islandLp?.let {
+            it.x = 0
+            it.y = baseY.coerceAtLeast(0)
+        }
+        touchLp?.let {
             it.x = baseX
             it.y = baseY.coerceAtLeast(0)
         }
+        islandView?.setOffsetX(baseX)
     }
 
     private fun applyVisibility() {
@@ -383,13 +426,14 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         val showIsland = enabled && !landscape && !shadeOpen &&
             !(fullscreen && prefs.getBoolean(P.HIDE_FULLSCREEN, true))
         val iv = islandView ?: return
-        val p = islandLp ?: return
+        val p = touchLp ?: return
         if (showIsland != islandShown) {
             islandShown = showIsland
             iv.visibility = if (showIsland) View.VISIBLE else View.GONE
+            touchView?.visibility = if (showIsland) View.VISIBLE else View.GONE
             p.flags = if (showIsland) p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
             else p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            pushIslandLayout()
+            pushTouchLayout()
         }
     }
 
