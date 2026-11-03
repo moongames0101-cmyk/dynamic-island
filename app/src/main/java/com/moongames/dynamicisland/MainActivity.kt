@@ -150,11 +150,13 @@ class MainActivity : Activity() {
 
         buildSetup()
         buildTry()
-        buildStatusBar()
+        buildApps()
         buildFeatures()
         buildLook()
         buildPrompts()
+        buildStatusBar()
         buildUpdates()
+        buildDiagnostics()
         buildAbout()
     }
 
@@ -196,6 +198,24 @@ class MainActivity : Activity() {
         statusRow(c, "Notification access", "For notifications, music, calls, timers and maps.", { listenerOn() }, "Allow") {
             open(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
         }
+        divider(c)
+        statusRow(
+            c, "Calls",
+            "Shows every call in the island (even when the phone app's notification isn't recognised) and makes Answer / Hang up work. Doesn't read numbers or call history.",
+            { granted(Manifest.permission.READ_PHONE_STATE) && granted(Manifest.permission.ANSWER_PHONE_CALLS) }, "Allow"
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.ANSWER_PHONE_CALLS), 3)
+        }
+        divider(c)
+        statusRow(
+            c, "Keep running",
+            "Stops Samsung's battery saver from closing the island in the background.",
+            { (getSystemService(POWER_SERVICE) as android.os.PowerManager).isIgnoringBatteryOptimizations(packageName) }, "Allow"
+        ) {
+            @android.annotation.SuppressLint("BatteryLife")
+            val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+            open(i)
+        }
         if (Build.VERSION.SDK_INT >= 33) {
             divider(c)
             statusRow(c, "Update alerts", "Lets the app tell you when a new version is ready.", { granted(Manifest.permission.POST_NOTIFICATIONS) }, "Allow") {
@@ -224,7 +244,8 @@ class MainActivity : Activity() {
         val c = section("Try it")
         val rows = listOf(
             listOf("Notification" to "notification", "Charging" to "charging", "Silent" to "silent"),
-            listOf("Timer" to "timer", "Prompt" to "prompt", "Headphones" to "bluetooth")
+            listOf("Timer" to "timer", "Prompt" to "prompt", "Headphones" to "bluetooth"),
+            listOf("Call" to "call", "Unlock" to "unlock", "Quick apps" to "quick")
         )
         for ((ri, r) in rows.withIndex()) {
             val row = hbox()
@@ -259,6 +280,42 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun buildApps() {
+        val c = section("Apps & notifications")
+        val count = label("", 13f, C.GRAY, lines = 2)
+        val chooseBtn = button("Choose", C.BLUE) { open(Intent(this, AppsActivity::class.java)) }
+        val v = vbox()
+        v.setPadding(0, 12.dp, 0, 12.dp)
+        val h = hbox()
+        val t = vbox()
+        t.addView(label("Choose apps", 16f, Color.WHITE))
+        count.setPadding(0, 4.dp, 0, 0)
+        t.addView(count)
+        h.addView(t, llp(0, WRAP, 1f))
+        h.addView(chooseBtn, llp(WRAP, WRAP).apply { marginStart = 12.dp })
+        v.addView(h)
+        c.addView(v)
+        refreshers += {
+            val off = (prefs.getStringSet(P.BLOCKED_APPS, emptySet()) ?: emptySet()).size
+            count.text = (if (off == 0) "Every app can use the island" else "$off app${if (off == 1) "" else "s"} switched off") +
+                " · pick your quick apps"
+        }
+        divider(c)
+        switchRow(
+            c, "Hide message text when locked",
+            "While the phone is locked, pop-ups show only the app name (like iPhone).", P.HIDE_LOCKED, true
+        )
+        divider(c)
+        switchRow(
+            c, "Swipe away clears it",
+            "Swiping a notification off the island also clears it from the notification shade.", P.SWIPE_CLEARS, true
+        )
+        c.addView(label(
+            "Gestures: tap to open · touch and hold to expand (and see Reply) · swipe sideways to dismiss · swipe up to hide.",
+            12.5f, C.GRAY, lines = 4
+        ).apply { setPadding(0, 4.dp, 0, 14.dp) })
+    }
+
     private fun buildFeatures() {
         val c = section("What the island shows")
         P.FEATURES.forEachIndexed { i, f ->
@@ -278,6 +335,29 @@ class MainActivity : Activity() {
         sliderRow(c, "Move left / right", P.OFF_X, -160, 160, 0, "")
         divider(c)
         sliderRow(c, "Pop-up time", P.TOAST_SECS, 2, 10, 4, " s")
+        divider(c)
+        val seg = hbox()
+        val names = listOf("Slow", "Normal", "Fast")
+        val btns = names.map { button(it, C.CARD2) {} }
+        fun paint() {
+            val cur = prefs.getInt(P.ANIM_SPEED, 1)
+            btns.forEachIndexed { i, b -> b.background = roundRect(if (i == cur) C.BLUE else C.CARD2, 50f.dpf) }
+        }
+        btns.forEachIndexed { i, b ->
+            b.setOnClickListener {
+                prefs.edit().putInt(P.ANIM_SPEED, i).apply()
+                paint()
+                IslandService.instance?.demo("unlock")
+            }
+            b.setPadding(12.dp, 9.dp, 12.dp, 9.dp)
+            seg.addView(b, llp(WRAP, WRAP).apply { if (i > 0) marginStart = 6.dp })
+        }
+        paint()
+        val animRow = vbox()
+        animRow.setPadding(0, 12.dp, 0, 12.dp)
+        animRow.addView(label("Animation speed", 16f, Color.WHITE))
+        animRow.addView(seg, llp(WRAP, WRAP).apply { topMargin = 10.dp })
+        c.addView(animRow)
         divider(c)
         switchRow(c, "Show pill when idle", "Keep the black pill around the camera even when nothing is happening.", P.IDLE_VISIBLE, true)
         divider(c)
@@ -412,6 +492,31 @@ class MainActivity : Activity() {
             "Checks GitHub every 6 hours. New versions download in the background; Android may ask you to tap Install.",
             P.AUTO_UPDATE, true
         )
+    }
+
+    private fun buildDiagnostics() {
+        val c = section("Diagnostics")
+        c.addView(label(
+            "What the island has seen recently (app names and types only, never message text). If something doesn't show, send a screenshot of this.",
+            13f, C.GRAY, lines = 4
+        ).apply { setPadding(0, 12.dp, 0, 8.dp) })
+        val log = TextView(this)
+        log.textSize = 11.5f
+        log.setTextColor(C.LIGHT)
+        log.typeface = android.graphics.Typeface.MONOSPACE
+        log.setTextIsSelectable(true)
+        c.addView(log, llp(MATCH, WRAP))
+        val row = hbox()
+        row.setPadding(0, 10.dp, 0, 14.dp)
+        row.addView(button("Refresh", C.CARD2) { log.text = Diag.dump() })
+        row.addView(button("Copy", C.CARD2) {
+            (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(
+                ClipData.newPlainText("Dynamic Island diagnostics", "v${BuildConfig.VERSION_NAME}\n" + Diag.dump())
+            )
+            toast("Copied")
+        }, llp(WRAP, WRAP).apply { marginStart = 8.dp })
+        c.addView(row)
+        refreshers += { log.text = Diag.dump() }
     }
 
     private fun buildAbout() {

@@ -190,7 +190,7 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
         }
 
         val a = ValueAnimator.ofFloat(0f, 1f)
-        a.duration = 460L
+        a.duration = (460L * svc.animFactor()).toLong()
         a.interpolator = LinearInterpolator()
         a.addUpdateListener {
             val f = springSize.getInterpolation(it.animatedValue as Float)
@@ -219,16 +219,18 @@ class IslandView(ctx: Context, private val svc: IslandService) : FrameLayout(ctx
         v.alpha = 0f
         v.scaleX = 0.95f
         v.scaleY = 0.95f
-        v.animate().alpha(1f).scaleX(1f).scaleY(1f).setStartDelay(delay).setDuration(300)
+        val f = svc.animFactor()
+        v.animate().alpha(1f).scaleX(1f).scaleY(1f).setStartDelay((delay * f).toLong()).setDuration((300 * f).toLong())
             .setInterpolator(easeOut).start()
-        blur(v, 12f, 0f, delay, 260L, null)
+        blur(v, 12f, 0f, (delay * f).toLong(), (260 * f).toLong(), null)
     }
 
     private fun contentOut(v: View) {
         v.animate().cancel()
-        v.animate().alpha(0f).scaleX(0.96f).scaleY(0.96f).setStartDelay(0).setDuration(140)
+        val f = svc.animFactor()
+        v.animate().alpha(0f).scaleX(0.96f).scaleY(0.96f).setStartDelay(0).setDuration((140 * f).toLong())
             .setInterpolator(easeOut).withEndAction { pill.removeView(v) }.start()
-        blur(v, 0f, 12f, 0L, 140L, null)
+        blur(v, 0f, 12f, 0L, (140 * f).toLong(), null)
     }
 
     /** Gaussian blur on Android 12+; plain fade on older phones. */

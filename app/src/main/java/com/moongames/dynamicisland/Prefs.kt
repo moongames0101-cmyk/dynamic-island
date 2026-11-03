@@ -28,6 +28,11 @@ object P {
     const val SEEN_VERSION = "seen_version"
     const val PROMPTS = "prompts"
     const val PINNED = "pinned"
+    const val BLOCKED_APPS = "blocked_apps"
+    const val QUICK_APPS = "quick_apps"
+    const val HIDE_LOCKED = "hide_locked"
+    const val SWIPE_CLEARS = "swipe_clears"
+    const val ANIM_SPEED = "anim_speed"
 
     const val F_NOTIFICATIONS = "f_notifications"
     const val F_MEDIA = "f_media"
@@ -41,11 +46,12 @@ object P {
     const val F_FLASHLIGHT = "f_flashlight"
     const val F_BLUETOOTH = "f_bluetooth"
     const val F_PROMPTS = "f_prompts"
+    const val F_UNLOCK = "f_unlock"
 
     val FEATURES = listOf(
         Feature(F_NOTIFICATIONS, "Notifications", "Messages and alerts drop out of the island. Tip: turn off Android's own pop-up banners so you don't get two."),
         Feature(F_MEDIA, "Music & video", "Album art and a moving waveform. Tap for play/pause, skip and a seek bar."),
-        Feature(F_CALLS, "Calls", "Incoming calls with Answer / Decline, and a call timer while you talk."),
+        Feature(F_CALLS, "Calls", "Incoming calls with Answer / Decline, and a call timer while you talk. Allow \"Calls\" in Setup so it works with every phone app."),
         Feature(F_TIMERS, "Timers & stopwatch", "Live countdown from your Clock app (and screen recorders)."),
         Feature(F_NAVIGATION, "Maps directions", "Next turn from Google Maps and other navigation apps."),
         Feature(F_PROGRESS, "Downloads & uploads", "Progress ring for anything showing a progress bar."),
@@ -53,7 +59,8 @@ object P {
         Feature(F_LOWBATTERY, "Low battery", "Red warning when you drop to 20%."),
         Feature(F_RINGER, "Silent / Ring", "Shows when you switch sound mode."),
         Feature(F_FLASHLIGHT, "Flashlight", "Shows when the torch turns on or off."),
-        Feature(F_BLUETOOTH, "Headphones", "Bluetooth devices connecting, with battery %."),
+        Feature(F_UNLOCK, "Unlock", "A padlock pops open when you unlock with your face or fingerprint."),
+        Feature(F_BLUETOOTH, "Headphones", "Bluetooth headphones connecting (with battery %) and wired headphones plugged in."),
         Feature(F_PROMPTS, "Custom prompts", "Your own messages — on demand, pinned, or every day at a set time.")
     )
 }

@@ -1,5 +1,6 @@
 package com.moongames.dynamicisland
 
+import android.app.Notification
 import android.app.PendingIntent
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -11,7 +12,16 @@ enum class LiveKind(val priority: Int) {
     CALL(100), TIMER(80), NAV(70), MEDIA(60), PROGRESS(50), PROMPT(10)
 }
 
-class NotifAction(val title: CharSequence, val intent: PendingIntent?)
+/**
+ * A button: either an app's notification action ([intent]), something we do ourselves ([run]),
+ * or a reply box ([reply] holds the app's RemoteInput action).
+ */
+class NotifAction(
+    val title: CharSequence,
+    val intent: PendingIntent?,
+    val run: (() -> Unit)? = null,
+    val reply: Notification.Action? = null
+)
 
 /** Something that stays in the island while it's happening (a call, a timer, music…). */
 class LiveItem(val key: String, var kind: LiveKind) {
@@ -66,7 +76,7 @@ class MediaInfo(
     }
 }
 
-enum class ToastStyle { BANNER, CARD }
+enum class ToastStyle { BANNER, CARD, UNLOCK }
 
 /** A short pop-out (a notification, charging, silent mode…). */
 class ToastItem(
@@ -87,11 +97,32 @@ class ToastItem(
     /** Round (contact photo) vs rounded-square (app icon). */
     val iconRound: Boolean = false,
     /** Coloured capsule behind the icon, like iOS's red Silent bell. 0 = none. */
-    val iconBg: Int = 0
+    val iconBg: Int = 0,
+    /** The app's buttons (Reply, Mark as read…), shown when you touch and hold. */
+    val actions: List<NotifAction> = emptyList(),
+    /** The notification this came from, so swiping it away can clear it. */
+    val notifKey: String? = null
 ) {
+    val expandable: Boolean get() = style == ToastStyle.CARD && (actions.isNotEmpty() || text.length > 60)
+
     val id: Int = nextId++
 
     companion object {
         private var nextId = 1
     }
+}
+
+/** Small, content-free log of what the island saw, shown in the app to help fix phone quirks. */
+object Diag {
+    private val lines = ArrayDeque<String>()
+
+    @Synchronized
+    fun add(line: String) {
+        val t = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        lines.addFirst("$t  $line")
+        while (lines.size > 25) lines.removeLast()
+    }
+
+    @Synchronized
+    fun dump(): String = if (lines.isEmpty()) "Nothing yet — get a notification or a call, then come back." else lines.joinToString("\n")
 }

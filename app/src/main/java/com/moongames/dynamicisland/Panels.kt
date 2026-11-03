@@ -65,8 +65,13 @@ object Panels {
         else -> GenericPanel(svc, item, g)
     }
 
-    fun toast(svc: IslandService, t: ToastItem, g: Geo): Panel =
-        if (t.style == ToastStyle.CARD) CardToastPanel(svc, t, g) else BannerPanel(svc, t, g)
+    fun toast(svc: IslandService, t: ToastItem, g: Geo, expanded: Boolean = false): Panel = when (t.style) {
+        ToastStyle.CARD -> if (expanded) NotifExpandedPanel(svc, t, g) else CardToastPanel(svc, t, g)
+        ToastStyle.UNLOCK -> UnlockPanel(svc, g)
+        ToastStyle.BANNER -> BannerPanel(svc, t, g)
+    }
+
+    fun quickApps(svc: IslandService, apps: List<QuickApp>, g: Geo): Panel = QuickAppsPanel(svc, apps, g)
 
     fun actionColor(title: String): Int {
         val t = title.lowercase()
@@ -390,7 +395,7 @@ private class GenericPanel(private val svc: IslandService, private val item: Liv
                 b.background = roundRect(if (timer) 0x40FF9F0A else Panels.actionColor(a.title.toString()), 21f.dpf)
                 b.setOnClickListener {
                     svc.touched()
-                    svc.sendPending(a.intent)
+                    svc.runAction(a)
                     if (item.kind == LiveKind.CALL) svc.collapse()
                 }
                 row.addView(b, llp(0, 42.dp, 1f).apply { if (i > 0) marginStart = 10.dp })
@@ -612,7 +617,7 @@ private class CallPanel(private val svc: IslandService, private val item: LiveIt
         b.addView(iv, flp(24.dp, 24.dp, Gravity.CENTER))
         b.setOnClickListener {
             svc.touched()
-            svc.sendPending(action.intent)
+            svc.runAction(action)
             if (end) svc.collapse()
         }
         row.addView(b, llp(52.dp, 52.dp).apply { marginStart = 10.dp })
@@ -636,3 +641,153 @@ private class CallPanel(private val svc: IslandService, private val item: LiveIt
 
 @Suppress("unused")
 private fun LinearLayout.gap(px: Int) = addView(View(context), llp(px, 1))
+
+/** A notification you touched and held: full message plus the app's buttons (Reply, Mark as read…). */
+private class NotifExpandedPanel(private val svc: IslandService, t: ToastItem, g: Geo) : Panel(svc) {
+    private val root = FrameLayout(svc)
+    override val view: View get() = root
+
+    init {
+        width = g.cardW
+        val col = svc.vbox()
+        val padH = 18.dp
+        col.setPadding(padH, 18.dp, padH, 16.dp)
+
+        val top = svc.hbox(Gravity.TOP)
+        val iconBox = FrameLayout(svc)
+        if (t.icon != null) {
+            val iv = ImageView(svc)
+            iv.setImageDrawable(t.icon)
+            iv.scaleType = ImageView.ScaleType.CENTER_CROP
+            iv.roundCorners(if (t.iconRound) 22f.dpf else 11f.dpf)
+            iconBox.addView(iv, flp(44.dp, 44.dp, Gravity.TOP or Gravity.START))
+        }
+        if (t.badge != null) {
+            val b = ImageView(svc)
+            b.setImageDrawable(t.badge)
+            b.scaleType = ImageView.ScaleType.CENTER_CROP
+            b.roundCorners(5f.dpf)
+            iconBox.addView(b, flp(19.dp, 19.dp, Gravity.BOTTOM or Gravity.END))
+        }
+        top.addView(iconBox, llp(50.dp, 50.dp))
+
+        val txt = svc.vbox()
+        txt.setPadding(10.dp, 0, 0, 0)
+        val head = svc.hbox()
+        head.addView(svc.label(t.title, 15.5f, Color.WHITE, bold = true), llp(0, WRAP, 1f))
+        head.addView(svc.label(t.appName.ifEmpty { "now" }, 12.5f, C.GRAY), llp(WRAP, WRAP).apply { marginStart = 8.dp })
+        txt.addView(head, llp(MATCH, WRAP))
+        val body = svc.label(t.text, 14f, C.LIGHT, lines = 6)
+        body.setPadding(0, 4.dp, 0, 0)
+        if (t.text.isNotBlank()) txt.addView(body)
+        top.addView(txt, llp(0, WRAP, 1f))
+        col.addView(top, llp(MATCH, WRAP))
+
+        // Measure the message so the island grows to fit it.
+        val textW = width - 2 * padH - 50.dp - 10.dp
+        body.measure(
+            View.MeasureSpec.makeMeasureSpec(textW, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val textH = max(50.dp, 22.dp + (if (t.text.isNotBlank()) body.measuredHeight else 0))
+
+        var buttonsH = 0
+        if (t.actions.isNotEmpty()) {
+            val row = svc.hbox()
+            row.setPadding(0, 14.dp, 0, 0)
+            t.actions.take(3).forEachIndexed { i, a ->
+                val b = svc.hbox(Gravity.CENTER)
+                b.background = roundRect(if (a.reply != null) C.BLUE else C.CARD2, 21f.dpf)
+                if (a.reply != null) {
+                    val ic = ImageView(svc)
+                    ic.setImageResource(R.drawable.ic_reply)
+                    b.addView(ic, llp(16.dp, 16.dp).apply { marginEnd = 6.dp })
+                }
+                b.addView(svc.label(a.title, 14f, Color.WHITE, bold = true), llp(WRAP, WRAP))
+                b.setOnClickListener {
+                    svc.touched()
+                    svc.runAction(a, t)
+                }
+                row.addView(b, llp(0, 42.dp, 1f).apply { if (i > 0) marginStart = 8.dp })
+            }
+            col.addView(row, llp(MATCH, WRAP))
+            buttonsH = 14.dp + 42.dp
+        }
+        height = 18.dp + textH + buttonsH + 16.dp
+        radius = min(height / 2f, 42f.dpf)
+        root.addView(col, flp(MATCH, MATCH))
+    }
+}
+
+class QuickApp(val label: String, val icon: Drawable?, val open: () -> Unit)
+
+/** Touch and hold the island when nothing is happening: a tray of your favourite apps. */
+private class QuickAppsPanel(private val svc: IslandService, apps: List<QuickApp>, g: Geo) : Panel(svc) {
+    private val root = FrameLayout(svc)
+    override val view: View get() = root
+
+    init {
+        width = g.cardW
+        val perRow = 4
+        val rows = (apps.size + perRow - 1) / perRow
+        val cell = 78.dp
+        height = 16.dp + rows * cell + 8.dp
+        radius = 40f.dpf
+
+        val grid = svc.vbox()
+        grid.setPadding(10.dp, 16.dp, 10.dp, 8.dp)
+        for (r in 0 until rows) {
+            val row = svc.hbox(Gravity.TOP)
+            for (c in 0 until perRow) {
+                val i = r * perRow + c
+                val cellView = svc.vbox()
+                cellView.gravity = Gravity.CENTER_HORIZONTAL
+                if (i < apps.size) {
+                    val a = apps[i]
+                    val iv = ImageView(svc)
+                    iv.setImageDrawable(a.icon)
+                    iv.scaleType = ImageView.ScaleType.CENTER_CROP
+                    iv.roundCorners(13f.dpf)
+                    cellView.addView(iv, llp(50.dp, 50.dp))
+                    val l = svc.label(a.label, 11.5f, C.LIGHT)
+                    l.gravity = Gravity.CENTER
+                    l.setPadding(2.dp, 5.dp, 2.dp, 0)
+                    cellView.addView(l, llp(MATCH, WRAP))
+                    cellView.setOnClickListener {
+                        svc.collapse()
+                        a.open()
+                    }
+                }
+                row.addView(cellView, llp(0, cell, 1f))
+            }
+            grid.addView(row, llp(MATCH, WRAP))
+        }
+        root.addView(grid, flp(MATCH, MATCH))
+    }
+}
+
+/** iPhone-style unlock: a padlock that pops open. */
+private class UnlockPanel(private val svc: IslandService, g: Geo) : Panel(svc) {
+    private val root = FrameLayout(svc)
+    override val view: View get() = root
+    private val lock = ImageView(svc)
+
+    init {
+        height = g.idleH
+        width = g.idleW + 2 * max(g.idleH, 30.dp)
+        radius = height / 2f
+        val size = (g.idleH - 10.dp).coerceIn(14.dp, 22.dp)
+        lock.setImageDrawable(svc.tinted(R.drawable.ic_lock, Color.WHITE))
+        root.addView(lock, flp(size, size, Gravity.START or Gravity.CENTER_VERTICAL).apply {
+            marginStart = (g.idleH - size) / 2 + 6.dp
+        })
+        lock.postDelayed({
+            lock.animate().scaleX(0.75f).scaleY(0.75f).setStartDelay(0).setDuration(110).withEndAction {
+                lock.setImageDrawable(svc.tinted(R.drawable.ic_lock_open, Color.WHITE))
+                lock.animate().scaleX(1.12f).scaleY(1.12f).setDuration(160).withEndAction {
+                    lock.animate().scaleX(1f).scaleY(1f).setDuration(160).start()
+                }.start()
+            }.start()
+        }, 380L)
+    }
+}

@@ -1,5 +1,6 @@
 package com.moongames.dynamicisland
 
+import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.app.ActivityOptions
 import android.app.KeyguardManager
@@ -11,6 +12,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.graphics.Point
@@ -26,6 +28,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.telecom.TelecomManager
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyCallback
+import android.telephony.TelephonyManager
 import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
@@ -46,6 +52,8 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         const val ACTION_PROMPT = "com.moongames.dynamicisland.SHOW_PROMPT"
         const val MEDIA_KEY = "media"
         const val PROMPT_KEY = "pinned_prompt"
+        const val PHONE_CALL_KEY = "phone_state_call"
+        private const val DEMO_CALL = "demo_call"
         private const val DEMO_TIMER = "demo_timer"
     }
 
@@ -63,6 +71,11 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     private val queue = ArrayDeque<ToastItem>()
     private var toast: ToastItem? = null
     private var expandedKey: String? = null
+    private var toastExpanded = false
+    private var quickOpen = false
+    private var callState = TelephonyManager.CALL_STATE_IDLE
+    private var callStart = 0L
+    private var phoneCallback: Any? = null
     private var stateId = ""
     private var panel: Panel? = null
 
@@ -116,6 +129,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         }
         registerReceivers()
         registerTorch()
+        registerPhoneState()
         syncPinned()
         // Re-apply "Hide system icons" so new versions pick up an updated icon list.
         if (prefs.getBoolean(P.NATIVE_ICONS, false)) StatusIcons.apply(this, true)
@@ -160,6 +174,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             try { (getSystemService(CAMERA_SERVICE) as CameraManager).unregisterTorchCallback(cb) } catch (e: Exception) { }
         }
         torchCallback = null
+        unregisterPhoneState()
         for (v in listOf<View?>(islandView, touchView, probeView)) {
             if (v != null) try { wm.removeViewImmediate(v) } catch (e: Exception) { }
         }
@@ -196,6 +211,10 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
                 if (!feature(P.F_MEDIA)) removeLive(MEDIA_KEY) else NotifListener.instance?.resync()
             }
             P.IDLE_VISIBLE, P.ENABLED, P.HIDE_FULLSCREEN -> render(true)
+            P.BLOCKED_APPS -> {
+                val off = blockedApps()
+                lives.values.filter { it.pkg in off && it.key != PHONE_CALL_KEY }.map { it.key }.forEach { removeLive(it) }
+            }
             else -> {}
         }
     }
@@ -503,10 +522,18 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         val top = topLive()
         val id: String
         val make: () -> Panel
+        if (t == null) toastExpanded = false
+        val showQuick = quickOpen && t == null
         when {
             t != null -> {
-                id = "toast:${t.id}"
-                make = { Panels.toast(this, t, g) }
+                val ex = toastExpanded && t.expandable
+                id = "toast:${t.id}:$ex"
+                make = { Panels.toast(this, t, g, ex) }
+            }
+            showQuick -> {
+                val apps = quickApps()
+                id = "quick:" + apps.joinToString(",") { it.label }
+                make = { Panels.quickApps(this, apps, g) }
             }
             exp != null -> {
                 id = "exp:" + exp.signature()
@@ -532,23 +559,27 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             iv.morph(p.width, p.height, p.radius, p.view)
         }
         // iPhone-style split: a second activity shows as a small circle beside the island.
-        val second = if (t == null && exp == null && top != null) secondLive(top.key) else null
+        val second = if (t == null && !showQuick && exp == null && top != null) secondLive(top.key) else null
         iv.setBubble(second, g.idleH)
     }
 
     private fun topLive(): LiveItem? {
         var best: LiveItem? = null
         for (item in lives.values) {
-            if (item.key in snoozed) continue
+            if (item.key in snoozed || hiddenDuplicate(item)) continue
             if (best == null || item.kind.priority >= best.kind.priority) best = item
         }
         return best
     }
 
+    /** The call we track from the phone's call state is a fallback for when no call notification is recognised. */
+    private fun hiddenDuplicate(item: LiveItem): Boolean =
+        item.key == PHONE_CALL_KEY && lives.values.any { it.kind == LiveKind.CALL && it.key != PHONE_CALL_KEY }
+
     private fun secondLive(exclude: String? = topLive()?.key): LiveItem? {
         var best: LiveItem? = null
         for (item in lives.values) {
-            if (item.key == exclude || item.key in snoozed) continue
+            if (item.key == exclude || item.key in snoozed || hiddenDuplicate(item)) continue
             if (best == null || item.kind.priority >= best.kind.priority) best = item
         }
         return best
@@ -563,6 +594,10 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             val action = t.onTap
             nextToast()
             action?.invoke()
+            return
+        }
+        if (quickOpen) {
+            collapse()
             return
         }
         val exp = expandedKey?.let { lives[it] }
@@ -587,10 +622,23 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     /** Like iPhone: touch and hold expands the activity. */
     fun onIslandLongPress() {
-        if (toast != null) return
+        val t = toast
+        if (t != null) {
+            // Hold a notification to see all of it and its buttons (Reply, Mark as read…).
+            if (t.expandable && !toastExpanded) {
+                toastExpanded = true
+                main.removeCallbacks(toastEnd)
+                touched()
+                render()
+            }
+            return
+        }
         val top = topLive()
         if (top == null) {
-            islandView?.bounce()
+            // Nothing happening: show your quick apps.
+            quickOpen = true
+            touched()
+            render()
             return
         }
         if (expandedKey == null) {
@@ -606,8 +654,16 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     /** Swipe sideways to tuck the current activity away (it comes back when it changes). */
     fun onIslandSwipeSide() {
-        if (toast != null) {
+        val t = toast
+        if (t != null) {
+            // Swipe a notification away; optionally clear it from the notification shade too.
+            val key = t.notifKey
+            if (key != null && prefs.getBoolean(P.SWIPE_CLEARS, true)) NotifListener.instance?.dismiss(key)
             nextToast()
+            return
+        }
+        if (quickOpen) {
+            collapse()
             return
         }
         if (expandedKey != null) {
@@ -646,13 +702,27 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
     }
 
     fun collapse() {
+        var changed = false
         if (expandedKey != null) {
             expandedKey = null
-            render()
+            changed = true
         }
+        if (quickOpen) {
+            quickOpen = false
+            changed = true
+        }
+        if (toastExpanded && toast != null) {
+            nextToast()
+            return
+        }
+        if (changed) render()
     }
 
     private fun openItem(item: LiveItem) {
+        if (item.key == PHONE_CALL_KEY) {
+            showInCallScreen()
+            return
+        }
         when (item.kind) {
             LiveKind.MEDIA -> {
                 val pi = item.media?.controller?.sessionActivity
@@ -699,6 +769,198 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         }
     }
 
+    /** Presses a button: the app's own action, one of ours, or opens the reply box. */
+    fun runAction(a: NotifAction, from: ToastItem? = null) {
+        val reply = a.reply
+        when {
+            reply != null -> {
+                ReplyActivity.pendingAction = reply
+                ReplyActivity.pendingTitle = from?.title ?: ""
+                ReplyActivity.pendingIcon = from?.icon
+                if (toast === from) nextToast()
+                try {
+                    val i = Intent(this, ReplyActivity::class.java)
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    startActivity(i)
+                } catch (e: Exception) {
+                }
+            }
+            a.run != null -> a.run.invoke()
+            else -> {
+                sendPending(a.intent)
+                if (from != null && toast === from) nextToast()
+            }
+        }
+    }
+
+    fun blockedApps(): Set<String> = prefs.getStringSet(P.BLOCKED_APPS, emptySet()) ?: emptySet()
+
+    fun animFactor(): Float = when (prefs.getInt(P.ANIM_SPEED, 1)) {
+        0 -> 1.45f
+        2 -> 0.7f
+        else -> 1f
+    }
+
+    // ------------------------------------------------------------------ quick apps
+
+    private fun defaultQuickPackages(): List<String> = QuickDefaults.packages(this)
+
+    fun quickApps(): List<QuickApp> {
+        val saved = (prefs.getString(P.QUICK_APPS, "") ?: "").split(',').filter { it.isNotBlank() }
+        val pkgs = (saved.ifEmpty { defaultQuickPackages() })
+            .filter { packageManager.getLaunchIntentForPackage(it) != null }
+            .take(QuickDefaults.MAX)
+        val list = pkgs.map { pkg -> QuickApp(appLabel(pkg), appIcon(pkg)) { launchApp(pkg) } }.toMutableList()
+        list.add(QuickApp("Edit", tinted(R.drawable.ic_add, android.graphics.Color.WHITE)) {
+            try {
+                startActivity(Intent(this, AppsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (e: Exception) {
+            }
+        })
+        return list
+    }
+
+    // ------------------------------------------------------------------ calls (phone state)
+
+    private fun hasPhonePermission(): Boolean =
+        checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
+
+    private fun canControlCalls(): Boolean =
+        checkSelfPermission(Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED
+
+    @Suppress("DEPRECATION")
+    private fun registerPhoneState() {
+        if (phoneCallback != null) return
+        if (Build.VERSION.SDK_INT >= 31 && !hasPhonePermission()) return
+        try {
+            val tm = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
+            if (Build.VERSION.SDK_INT >= 31) {
+                val cb = CallCallback()
+                tm.registerTelephonyCallback(mainExecutor, cb)
+                phoneCallback = cb
+            } else {
+                val l = object : PhoneStateListener() {
+                    override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                        onCallState(state)
+                    }
+                }
+                tm.listen(l, PhoneStateListener.LISTEN_CALL_STATE)
+                phoneCallback = l
+            }
+            Diag.add("Call watcher on")
+        } catch (e: Exception) {
+            Diag.add("Call watcher failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun unregisterPhoneState() {
+        val cb = phoneCallback ?: return
+        try {
+            val tm = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
+            if (Build.VERSION.SDK_INT >= 31 && cb is TelephonyCallback) tm.unregisterTelephonyCallback(cb)
+            else if (cb is PhoneStateListener) tm.listen(cb, PhoneStateListener.LISTEN_NONE)
+        } catch (e: Exception) {
+        }
+        phoneCallback = null
+    }
+
+    @android.annotation.TargetApi(31)
+    private inner class CallCallback : TelephonyCallback(), TelephonyCallback.CallStateListener {
+        override fun onCallStateChanged(state: Int) {
+            main.post { onCallState(state) }
+        }
+    }
+
+    private fun onCallState(state: Int) {
+        val prev = callState
+        callState = state
+        Diag.add(
+            "Call state: " + when (state) {
+                TelephonyManager.CALL_STATE_RINGING -> "ringing"
+                TelephonyManager.CALL_STATE_OFFHOOK -> "on a call"
+                else -> "idle"
+            }
+        )
+        if (!::prefs.isInitialized || !feature(P.F_CALLS)) {
+            removeLive(PHONE_CALL_KEY)
+            return
+        }
+        when (state) {
+            TelephonyManager.CALL_STATE_RINGING -> {
+                upsertLive(PHONE_CALL_KEY, LiveKind.CALL, autoExpand = true) { item ->
+                    item.incoming = true
+                    item.hasChrono = false
+                    item.title = "Phone"
+                    item.text = "Incoming call"
+                    item.appName = ""
+                    item.pkg = dialerPackage()
+                    item.icon = appIcon(item.pkg) ?: Panels.kindIcon(this, LiveKind.CALL)
+                    item.actions = if (canControlCalls()) listOf(
+                        NotifAction("Decline", null, run = { endCall() }),
+                        NotifAction("Answer", null, run = { answerCall() })
+                    ) else emptyList()
+                }
+            }
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                if (prev != TelephonyManager.CALL_STATE_OFFHOOK) callStart = System.currentTimeMillis()
+                if (expandedKey == PHONE_CALL_KEY) expandedKey = null
+                upsertLive(PHONE_CALL_KEY, LiveKind.CALL) { item ->
+                    item.incoming = false
+                    item.hasChrono = true
+                    item.countDown = false
+                    item.chronoBase = callStart
+                    item.title = "Phone"
+                    item.text = "On call"
+                    item.appName = ""
+                    item.pkg = dialerPackage()
+                    item.icon = appIcon(item.pkg) ?: Panels.kindIcon(this, LiveKind.CALL)
+                    item.actions = if (canControlCalls()) listOf(
+                        NotifAction("End call", null, run = { endCall() })
+                    ) else emptyList()
+                }
+            }
+            else -> removeLive(PHONE_CALL_KEY)
+        }
+    }
+
+    private fun dialerPackage(): String = try {
+        (getSystemService(TELECOM_SERVICE) as TelecomManager).defaultDialerPackage ?: ""
+    } catch (e: Exception) {
+        ""
+    }
+
+    @Suppress("DEPRECATION")
+    private fun endCall() {
+        try {
+            if (Build.VERSION.SDK_INT >= 28) (getSystemService(TELECOM_SERVICE) as TelecomManager).endCall()
+        } catch (e: Exception) {
+            Diag.add("Hang up failed: ${e.javaClass.simpleName}")
+        }
+        collapse()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun answerCall() {
+        try {
+            (getSystemService(TELECOM_SERVICE) as TelecomManager).acceptRingingCall()
+        } catch (e: Exception) {
+            Diag.add("Answer failed: ${e.javaClass.simpleName}")
+        }
+        collapse()
+    }
+
+    private fun showInCallScreen() {
+        try {
+            if (hasPhonePermission()) {
+                (getSystemService(TELECOM_SERVICE) as TelecomManager).showInCallScreen(false)
+                return
+            }
+        } catch (e: Exception) {
+        }
+        launchApp(dialerPackage())
+    }
+
     // ------------------------------------------------------------------ pop-outs
 
     fun showToast(t: ToastItem) {
@@ -718,6 +980,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     private fun nextToast() {
         main.removeCallbacks(toastEnd)
+        toastExpanded = false
         val n = queue.removeFirstOrNull()
         toast = n
         if (n != null) main.postDelayed(toastEnd, n.duration)
@@ -796,7 +1059,7 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
 
     fun setMedia(info: MediaInfo?) {
         if (!::prefs.isInitialized) return
-        if (info == null || !feature(P.F_MEDIA)) {
+        if (info == null || !feature(P.F_MEDIA) || info.pkg in blockedApps()) {
             removeLive(MEDIA_KEY)
             return
         }
@@ -845,6 +1108,8 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             }
             val ek = expandedKey
             if (ek != null && now - lastTouch > 15_000L && lives[ek]?.incoming != true) collapse()
+            if (quickOpen && now - lastTouch > 8_000L) collapse()
+            if (toastExpanded && toast != null && now - lastTouch > 12_000L) nextToast()
             if (previewUntil != 0L && now > previewUntil) {
                 previewUntil = 0L
                 render()
@@ -855,6 +1120,8 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
             if (++probeCheck >= 3) {
                 probeCheck = 0
                 if (islandView != null) updateProbe()
+                // Start watching calls as soon as the "Calls" permission is given.
+                if (phoneCallback == null) registerPhoneState()
             }
             // Re-attach the notification listener if Android dropped it.
             if (++rebindCheck >= 30) {
@@ -915,6 +1182,21 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
                 AudioManager.RINGER_MODE_CHANGED_ACTION ->
                     onRinger(i.getIntExtra(AudioManager.EXTRA_RINGER_MODE, -1))
                 BluetoothDevice.ACTION_ACL_CONNECTED -> onBluetooth(i)
+                Intent.ACTION_USER_PRESENT ->
+                    if (feature(P.F_UNLOCK) && toast == null) {
+                        showToast(ToastItem(ToastStyle.UNLOCK, title = "", duration = (1350 * animFactor()).toLong()))
+                    }
+                Intent.ACTION_HEADSET_PLUG -> {
+                    if (!isInitialStickyBroadcast && feature(P.F_BLUETOOTH) && i.getIntExtra("state", 0) == 1) {
+                        showToast(
+                            ToastItem(
+                                ToastStyle.BANNER, title = "Headphones", value = "Connected",
+                                icon = tinted(R.drawable.ic_headset, android.graphics.Color.WHITE),
+                                accent = C.GREEN, duration = 2600L
+                            )
+                        )
+                    }
+                }
             }
         }
     }
@@ -933,6 +1215,8 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
         f.addAction(Intent.ACTION_BATTERY_CHANGED)
         f.addAction(AudioManager.RINGER_MODE_CHANGED_ACTION)
         f.addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+        f.addAction(Intent.ACTION_USER_PRESENT)
+        f.addAction(Intent.ACTION_HEADSET_PLUG)
         val pf = IntentFilter(ACTION_PROMPT)
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(systemReceiver, f, Context.RECEIVER_EXPORTED)
@@ -1110,6 +1394,35 @@ class IslandService : AccessibilityService(), SharedPreferences.OnSharedPreferen
                 )
             )
             "prompt" -> showPrompt("✨", "This is your Dynamic Island!")
+            "unlock" -> showToast(ToastItem(ToastStyle.UNLOCK, title = "", duration = (1350 * animFactor()).toLong()))
+            "quick" -> {
+                quickOpen = true
+                touched()
+                render()
+            }
+            "call" -> {
+                upsertLive(DEMO_CALL, LiveKind.CALL, autoExpand = true) { item ->
+                    item.incoming = true
+                    item.title = "Mum"
+                    item.text = "Mobile"
+                    item.appName = "Phone"
+                    item.pkg = packageName
+                    item.icon = getDrawable(R.mipmap.ic_launcher)
+                    item.actions = listOf(
+                        NotifAction("Decline", null, run = { removeLive(DEMO_CALL) }),
+                        NotifAction("Answer", null, run = {
+                            upsertLive(DEMO_CALL, LiveKind.CALL) { it2 ->
+                                it2.incoming = false
+                                it2.hasChrono = true
+                                it2.chronoBase = System.currentTimeMillis()
+                                it2.actions = listOf(NotifAction("End", null, run = { removeLive(DEMO_CALL) }))
+                            }
+                            collapse()
+                        })
+                    )
+                }
+                main.postDelayed({ removeLive(DEMO_CALL) }, 60_000L)
+            }
             "timer" -> {
                 upsertLive(DEMO_TIMER, LiveKind.TIMER) { item ->
                     item.hasChrono = true

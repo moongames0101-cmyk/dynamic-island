@@ -83,6 +83,22 @@ class NotifListener : NotificationListenerService() {
         }
     }
 
+    /** Records what kind of notification arrived (never its text) for the diagnostics list. */
+    private fun diag(pkg: String, n: Notification, cat: String, template: String, result: String) {
+        val app = IslandService.instance?.appLabel(pkg) ?: pkg
+        val flags = mutableListOf<String>()
+        if ((n.flags and Notification.FLAG_ONGOING_EVENT) != 0) flags += "ongoing"
+        if ((n.flags and Notification.FLAG_FOREGROUND_SERVICE) != 0) flags += "fg"
+        if (n.extras?.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER) == true) flags += "timer"
+        if (n.fullScreenIntent != null) flags += "fullscreen"
+        val style = template.substringAfterLast('$').substringAfterLast('.')
+        Diag.add(
+            "$app ($pkg)" + (if (cat.isNotEmpty()) " cat=$cat" else "") +
+                (if (style.isNotEmpty()) " style=$style" else "") +
+                (if (flags.isNotEmpty()) " " + flags.joinToString(",") else "") + " $result"
+        )
+    }
+
     private fun str(ex: Bundle, key: String): String = ex.getCharSequence(key)?.toString()?.trim() ?: ""
 
     @Suppress("DEPRECATION")
@@ -98,6 +114,13 @@ class NotifListener : NotificationListenerService() {
 
         // Music/video is handled through media sessions instead.
         if (template.contains("MediaStyle") || cat == "transport") return
+
+        // Apps you've switched off in "Choose apps".
+        if (pkg in svc.blockedApps()) {
+            if (svc.liveKind(key) != null) svc.removeLive(key)
+            if (!initial) diag(pkg, n, cat, template, "skipped (app switched off)")
+            return
+        }
 
         val ongoing = (n.flags and Notification.FLAG_ONGOING_EVENT) != 0 ||
             (n.flags and Notification.FLAG_FOREGROUND_SERVICE) != 0
@@ -164,6 +187,7 @@ class NotifListener : NotificationListenerService() {
                 if (t == null || t.isEmpty()) null else NotifAction(t, a.actionIntent)
             }?.take(3) ?: emptyList()
             val k: LiveKind = kind
+            if (!initial && svc.liveKind(key) == null) diag(pkg, n, cat, template, "→ ${k.name.lowercase()}" + if (incoming) " (incoming)" else "")
             svc.upsertLive(key, k, autoExpand = incoming && !initial) { item ->
                 item.pkg = pkg
                 item.appName = appName
@@ -187,7 +211,12 @@ class NotifListener : NotificationListenerService() {
         // Not a live activity (any more) – drop it if it was one.
         if (svc.liveKind(key) != null) svc.removeLive(key)
 
-        if (initial || ongoing || !svc.feature(P.F_NOTIFICATIONS)) return
+        if (initial) return
+        if (ongoing) {
+            diag(pkg, n, cat, template, "skipped (ongoing)")
+            return
+        }
+        if (!svc.feature(P.F_NOTIFICATIONS)) return
         if ((n.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return
         if (title.isEmpty() && body.isEmpty()) {
             body = n.tickerText?.toString()?.trim() ?: ""
@@ -202,7 +231,10 @@ class NotifListener : NotificationListenerService() {
         } catch (e: Exception) {
             false
         }
-        if (ranked && ranking.importance < NotificationManager.IMPORTANCE_LOW) return
+        if (ranked && ranking.importance < NotificationManager.IMPORTANCE_LOW) {
+            diag(pkg, n, cat, template, "skipped (hidden notification)")
+            return
+        }
 
         // A chat that adds a new message keeps the same key: show it again whenever the text
         // changes, but not for silent re-posts of the same content.
@@ -218,17 +250,37 @@ class NotifListener : NotificationListenerService() {
             lastContent.clear()
         }
 
+        diag(pkg, n, cat, template, "→ pop-up")
         val contentIntent = n.contentIntent
+
+        // While the phone is locked, show only the app (like iPhone's "Show previews: when unlocked").
+        val locked = try {
+            (getSystemService(KEYGUARD_SERVICE) as android.app.KeyguardManager).isKeyguardLocked
+        } catch (e: Exception) {
+            false
+        }
+        val hidden = locked && svc.prefs.getBoolean(P.HIDE_LOCKED, true)
+
+        // The app's buttons: Reply (with a text box), Mark as read, etc.
+        val actions = if (hidden) emptyList() else n.actions?.mapNotNull { a ->
+            val t = a.title
+            if (t == null || t.isEmpty()) null
+            else if (!a.remoteInputs.isNullOrEmpty()) NotifAction(t, a.actionIntent, reply = a)
+            else NotifAction(t, a.actionIntent)
+        }?.sortedByDescending { it.reply != null }?.take(3) ?: emptyList()
+
         svc.showToast(
             ToastItem(
                 ToastStyle.CARD,
-                title = title.ifEmpty { appName },
-                text = body,
-                icon = largeIcon ?: appIcon,
-                badge = if (largeIcon != null) appIcon else null,
-                iconRound = largeIcon != null,
-                appName = appName,
+                title = if (hidden) appName else title.ifEmpty { appName },
+                text = if (hidden) "" else body,
+                icon = if (hidden) appIcon else largeIcon ?: appIcon,
+                badge = if (!hidden && largeIcon != null) appIcon else null,
+                iconRound = !hidden && largeIcon != null,
+                appName = if (hidden) "" else appName,
                 duration = svc.toastMs(),
+                actions = actions,
+                notifKey = key,
                 onTap = {
                     svc.sendPending(contentIntent)
                     if (autoCancel) dismiss(key)
